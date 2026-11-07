@@ -118,6 +118,43 @@ pub fn sleep_agent(
         Err(error) => return abort(format!("placeholder unavailable: {error}")),
     };
 
+    // The Placeholder command is typed into the pane's shell. Refuse values a
+    // shell could read differently from a single word (control characters
+    // split or end a command line, and fish treats a backslash as an escape
+    // even between single quotes) before the agent is touched.
+    let cwd_value = agent.effective_cwd().unwrap_or(".");
+    let state_dir_text = state_dir.to_string_lossy();
+    let main_bin_path = env.main_bin();
+    let herdr_bin_path = env.herdr_bin();
+    let main_bin_text = main_bin_path.to_string_lossy();
+    let herdr_bin_text = herdr_bin_path.to_string_lossy();
+    let placeholder_text = placeholder.to_string_lossy();
+    let early_words = [
+        pane,
+        kind,
+        session,
+        cwd_value,
+        config.sleep_icon.as_str(),
+        config.token_name.as_str(),
+        state_dir_text.as_ref(),
+        main_bin_text.as_ref(),
+        herdr_bin_text.as_ref(),
+        placeholder_text.as_ref(),
+    ];
+    let named = agent.name.as_deref().into_iter();
+    let resume = profile.resume_argv(session);
+    if let Some(word) = early_words
+        .iter()
+        .copied()
+        .chain(named)
+        .chain(resume.iter().map(String::as_str))
+        .find(|word| !is_typeable(word))
+    {
+        return abort(format!(
+            "cannot type {word:?} safely into a shell (control character or backslash)"
+        ));
+    }
+
     // 3. Preview and memory figure, both best effort.
     let preview = write_preview(env, config, pane, &state_dir);
     let freed_kb = env.agent_rss_kb(agent, &profile.bin).unwrap_or(0);
@@ -193,6 +230,11 @@ pub fn sleep_agent(
     );
     // `pane run` types the words into the pane's shell, so each one is quoted
     // for a POSIX shell (single quotes work in fish as well).
+    if let Some(word) = argv.iter().find(|word| !is_typeable(word)) {
+        return abort(format!(
+            "cannot type {word:?} safely into a shell (control character or backslash)"
+        ));
+    }
     let quoted: Vec<String> = argv.iter().map(|word| shell_quote(word)).collect();
     let mut command: Vec<&str> = vec!["exec"];
     command.extend(quoted.iter().map(String::as_str));
@@ -302,7 +344,16 @@ pub struct PlaceholderParams<'a> {
     pub resume: &'a [String],
 }
 
-/// Quote `word` for a POSIX shell so that it is read back as one word.
+/// Whether `word` can be typed into any common shell (POSIX shells and fish)
+/// as one quoted word: no control character, which would end or split the
+/// command line, and no backslash, which fish reads as an escape even between
+/// single quotes.
+pub fn is_typeable(word: &str) -> bool {
+    !word.chars().any(|c| c.is_control() || c == '\\')
+}
+
+/// Quote `word` so that a shell reads it back as one word. Only meaningful for
+/// words that pass [`is_typeable`].
 ///
 /// Words made only of safe characters are left alone, which keeps the typed
 /// command readable. The single-quote form `'\''` also works in fish.
@@ -969,5 +1020,41 @@ mod tests {
                 .unwrap()
                 .contains("--cwd '/work/my project'")
         );
+    }
+
+    #[test]
+    fn typeable_words_exclude_control_characters_and_backslashes() {
+        assert!(is_typeable("/work/my project"));
+        assert!(is_typeable("\u{1f4a4}"));
+        assert!(!is_typeable("a\nb"));
+        assert!(!is_typeable("a\tb"));
+        assert!(!is_typeable("c:\\dir"));
+        assert!(!is_typeable("esc\u{1b}[0m"));
+    }
+
+    #[test]
+    fn untypeable_agent_values_abort_before_anything_is_typed() {
+        for hostile in ["bad\nname", "back\\slash"] {
+            let mut fake = Fake::new("hostile-name");
+            fake.agent.name = Some(hostile.into());
+            let outcome = run(&fake, SleepMode::Sweep);
+            assert!(matches!(outcome, SleepOutcome::Aborted(_)), "{outcome:?}");
+            assert!(
+                !fake
+                    .calls()
+                    .iter()
+                    .any(|c| c.starts_with("text ") || c.starts_with("keys ")),
+                "{:?}",
+                fake.calls()
+            );
+            assert!(exec_call(&fake).is_none());
+        }
+        let mut fake = Fake::new("hostile-cwd");
+        fake.agent.cwd = Some("/work/it's\nhere".into());
+        assert!(matches!(
+            run(&fake, SleepMode::Sweep),
+            SleepOutcome::Aborted(_)
+        ));
+        assert!(exec_call(&fake).is_none());
     }
 }
