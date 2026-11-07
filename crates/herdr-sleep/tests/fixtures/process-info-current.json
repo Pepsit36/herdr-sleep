@@ -1,0 +1,1 @@
+{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":184214,"foreground_processes":[{"cwd":"/home/user/herdr-sleep","name":"claude","pid":184214}],"pane_id":"wC:p1","shell_pid":184186},"type":"pane_process_info"}}
