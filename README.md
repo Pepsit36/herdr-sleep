@@ -15,6 +15,9 @@ make build   # release binaries in target/release
 make e2e     # Docker end-to-end suite (not in place yet)
 ```
 
+Before a branch merges, `cargo xtask changelog stamp` (or `make changelog`) gives the `[Unreleased]`
+section of `CHANGELOG.md` the version the merge will publish; run it again after a rebase.
+
 See `CLAUDE.md` for the working conventions, `GLOSSARY.md` for the vocabulary and `docs/adr/`
 for the decisions that shape the design.
 

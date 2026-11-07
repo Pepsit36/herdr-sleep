@@ -32,10 +32,45 @@ clippy:
     - rustup component add clippy
     - cargo clippy --workspace --all-targets --locked -- -D warnings
 
-# The slim image has no `ps`, which the process inspection tests call.
+# The slim image has neither `ps` (process inspection tests) nor `git` (xtask tests).
 test:
   extends: .rust
   stage: test
   script:
-    - apt-get update -qq && apt-get install -y -qq procps >/dev/null
+    - apt-get update -qq && apt-get install -y -qq procps git >/dev/null
     - cargo test --workspace --locked
+
+# The branch checks on CHANGELOG.md need the default branch and the tags, and
+# the slim image has no git.
+changelog:check:
+  extends: .rust
+  stage: test
+  cache: []
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git >/dev/null
+    - rustc --version && cargo --version
+  script:
+    - git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+    - git fetch --tags origin
+    - cargo xtask changelog check --base origin/main
+    - cargo xtask changelog coverage
+
+release:backlog:
+  extends: .rust
+  stage: test
+  cache: []
+  variables:
+    GIT_DEPTH: "0"
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git >/dev/null
+    - rustc --version && cargo --version
+  script:
+    - git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+    - git fetch --tags origin
+    - cargo xtask release-backlog
