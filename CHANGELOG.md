@@ -14,6 +14,11 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Wake:** `herdr-sleep wake <pane|name>` wakes a sleeping agent: any focus, key or prompt wakes a
+  sleeping pane, and what was typed meanwhile is replayed into the agent once it is ready.
+
 ## [0.1.0] - 2026-11-07
 
 <!-- stamped -->

@@ -288,16 +288,7 @@ fn write_preview(env: &dyn Env, config: &Config, pane: &str, state_dir: &Path) -
     let first = lines.iter().position(|l| !l.is_empty())?;
     let last = lines.iter().rposition(|l| !l.is_empty())?;
     let text = lines[first..=last].join("\n");
-    let safe: String = pane
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let safe = super::wake::sanitize_pane(pane);
     let path = state_dir.join(format!("preview-{safe}.txt"));
     std::fs::write(&path, text).ok()?;
     Some(path.to_string_lossy().into_owned())
@@ -306,7 +297,7 @@ fn write_preview(env: &dyn Env, config: &Config, pane: &str, state_dir: &Path) -
 /// Call `done` with the time elapsed since the start until it returns true or
 /// `timeout` has passed, pausing `poll` between calls. The condition is
 /// checked once more at the deadline.
-fn wait_until(
+pub(super) fn wait_until(
     env: &dyn Env,
     timeout: Duration,
     poll: Duration,
@@ -569,6 +560,16 @@ mod tests {
             self.screen.clone()
         }
 
+        fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String> {
+            self.log(format!("read-ansi {pane} {lines}"));
+            self.screen.clone()
+        }
+
+        fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()> {
+            self.log(format!("rename {pane} {name}"));
+            Ok(())
+        }
+
         fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
             self.log(format!("text {pane} {text}"));
             Ok(())
@@ -637,6 +638,10 @@ mod tests {
 
         fn now(&self) -> Instant {
             self.base + self.elapsed.get()
+        }
+
+        fn now_millis(&self) -> u64 {
+            1_000_000_000_000 + u64::try_from(self.elapsed.get().as_millis()).unwrap()
         }
     }
 
