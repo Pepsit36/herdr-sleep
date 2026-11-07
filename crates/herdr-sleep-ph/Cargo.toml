@@ -1,0 +1,19 @@
+[package]
+name = "herdr-sleep-ph"
+description = "Placeholder process that occupies a sleeping Herdr pane (libc only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "herdr-sleep-ph"
+path = "src/main.rs"
+
+# Keep this list to libc: the Placeholder's RSS is the whole point (ADR 0001).
+[dependencies]
+libc.workspace = true
