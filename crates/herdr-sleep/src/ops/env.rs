@@ -2,7 +2,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{self, Config};
 use crate::guards::{self, Refusal, SleepMode};
@@ -26,6 +26,10 @@ pub trait Env {
     fn process_info(&self, pane: &str) -> EnvResult<ProcessInfo>;
     /// The last `lines` rows of a pane as plain text.
     fn screen_text(&self, pane: &str, lines: usize) -> EnvResult<String>;
+    /// The last `lines` rows of a pane with their escape sequences.
+    fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String>;
+    /// Give the agent in `pane` the name `name`.
+    fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()>;
     /// Type text into a pane without pressing Enter.
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()>;
     /// Press logical keys in a pane.
@@ -56,6 +60,8 @@ pub trait Env {
     fn sleep(&self, duration: Duration);
     /// The current instant of the environment's clock.
     fn now(&self) -> Instant;
+    /// Wall-clock time in milliseconds since the Unix epoch.
+    fn now_millis(&self) -> u64;
 }
 
 /// [`Env`] backed by the real Herdr, the real processes and the real clock.
@@ -120,6 +126,16 @@ impl Env for LiveEnv {
         self.client
             .pane_read(pane, lines, ReadFormat::Text)
             .map_err(message)
+    }
+
+    fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String> {
+        self.client
+            .pane_read(pane, lines, ReadFormat::Ansi)
+            .map_err(message)
+    }
+
+    fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()> {
+        self.client.agent_rename(pane, name).map_err(message)
     }
 
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
@@ -195,5 +211,11 @@ impl Env for LiveEnv {
 
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn now_millis(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
 }
