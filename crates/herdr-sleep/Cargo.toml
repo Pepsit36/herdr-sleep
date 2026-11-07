@@ -1,0 +1,17 @@
+[package]
+name = "herdr-sleep"
+description = "Herdr plugin that puts idle coding agents to sleep to free memory and wakes them on demand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "herdr-sleep"
+path = "src/main.rs"
+
+[dependencies]

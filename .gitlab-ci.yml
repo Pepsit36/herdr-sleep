@@ -1,0 +1,36 @@
+stages:
+  - test
+
+# Every Rust job shares this: the official image ships rustfmt and clippy,
+# and the cargo home sits inside the project so the cache can keep it.
+.rust:
+  image: rust:1.98-slim-bookworm
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+    CARGO_TERM_COLOR: always
+  cache:
+    key: cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo-home/registry/
+      - target/
+  before_script:
+    - rustc --version && cargo --version
+
+fmt:
+  extends: .rust
+  stage: test
+  cache: []
+  script:
+    - cargo fmt --all -- --check
+
+clippy:
+  extends: .rust
+  stage: test
+  script:
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+
+test:
+  extends: .rust
+  stage: test
+  script:
+    - cargo test --workspace --locked
