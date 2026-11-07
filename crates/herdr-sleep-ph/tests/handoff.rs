@@ -222,7 +222,7 @@ fn declares_shows_replays_and_hands_over() {
         let rss = h.rss_kib();
         println!("RSS while waiting: {rss} kB");
         // The unoptimised test binary is larger than the release one the
-        // plugin ships; the 2 MB budget applies to release builds.
+        // plugin ships; the release budget is 3000 kB, the e2e target.
         let budget = if cfg!(debug_assertions) { 4096 } else { 3000 };
         assert!(rss < budget, "RSS {rss} kB over {budget} kB");
     }
