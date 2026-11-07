@@ -1,8 +1,9 @@
 stages:
   - test
 
-# Every Rust job shares this: the official image ships rustfmt and clippy,
-# and the cargo home sits inside the project so the cache can keep it.
+# Every Rust job shares this. The slim image ships neither rustfmt nor clippy,
+# so the jobs that need them add the component first; the cargo home sits
+# inside the project so the cache can keep it.
 .rust:
   image: rust:1.98-slim-bookworm
   variables:
@@ -21,12 +22,14 @@ fmt:
   stage: test
   cache: []
   script:
+    - rustup component add rustfmt
     - cargo fmt --all -- --check
 
 clippy:
   extends: .rust
   stage: test
   script:
+    - rustup component add clippy
     - cargo clippy --workspace --all-targets --locked -- -D warnings
 
 test:
