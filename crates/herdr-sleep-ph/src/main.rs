@@ -3,35 +3,55 @@
 //! This crate depends on `libc` only. Everything it needs from the system
 //! (raw terminal mode, `poll`, `exec`) is reached through `libc` directly.
 
+mod args;
+mod handoff;
+mod input;
+mod report;
+mod screen;
+mod tty;
+
+use args::{Parsed, USAGE};
+use std::io::Write;
 use std::process::ExitCode;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const USAGE: &str = "\
-Usage: herdr-sleep-ph [options] -- <resume command...>
-
-The Placeholder is started by herdr-sleep inside a sleeping pane. It is not
-meant to be run by hand.
-
-Options:
-  -h, --help       Print this help and exit
-  -V, --version    Print the version and exit
-";
-
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("-h") | Some("--help") => {
+    let argv: Vec<String> = std::env::args().collect();
+    let args = match args::parse(argv.get(1..).unwrap_or_default()) {
+        Ok(Parsed::Help) => {
             print!("{USAGE}");
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
-        Some("-V") | Some("--version") => {
+        Ok(Parsed::Version) => {
             println!("herdr-sleep-ph {VERSION}");
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
-        _ => {
+        Ok(Parsed::Run(args)) => args,
+        Err(message) => {
+            eprintln!("herdr-sleep-ph: {message}");
             eprint!("{USAGE}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
-    }
+    };
+
+    let raw = tty::RawMode::enter();
+    let own = report::own_argv(&argv, std::env::current_exe().ok());
+    let mut reporter = report::Reporter::new(&args);
+    reporter.declare(&own);
+
+    let preview = args.preview.as_deref().and_then(screen::load_preview);
+    let banner = screen::Banner {
+        icon: &args.icon,
+        name: args.name.as_deref(),
+        kind: &args.kind,
+        session: &args.session,
+    };
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(screen::render(preview.as_deref(), &banner).as_bytes());
+    let _ = stdout.flush();
+
+    let captured = tty::capture(raw.is_some());
+    reporter.release();
+    handoff::run(&args, raw, &captured)
 }
