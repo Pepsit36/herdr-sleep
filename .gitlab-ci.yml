@@ -32,8 +32,10 @@ clippy:
     - rustup component add clippy
     - cargo clippy --workspace --all-targets --locked -- -D warnings
 
+# The slim image has no `ps`, which the process inspection tests call.
 test:
   extends: .rust
   stage: test
   script:
+    - apt-get update -qq && apt-get install -y -qq procps >/dev/null
     - cargo test --workspace --locked
