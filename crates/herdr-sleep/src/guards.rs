@@ -1,0 +1,901 @@
+//! Sleep guards: the checks that decide whether an agent may be put to sleep.
+//!
+//! [`check`] is pure: it works on a [`GuardContext`], which reads the outside
+//! world (process info, environment, screen) lazily through a [`Probe`].
+//! [`LiveProbe`] is the real implementation; tests inject their own. Guards
+//! fail closed (see ADR 0003): when the prompt cannot be recognised, the agent
+//! is not put to sleep.
+
+use std::fmt;
+
+use regex::Regex;
+
+use crate::config::{Config, Profile};
+use crate::herdr::client::{HerdrClient, ReadFormat};
+use crate::herdr::model::{Agent, AgentStatus, ProcessInfo};
+use crate::procs::{self, ProcessTable};
+
+/// Number of screen rows read to analyse the prompt.
+pub const SCREEN_LINES: usize = 40;
+/// Only this many rows at the bottom of the screen are searched for the prompt.
+const PROMPT_AREA_LINES: usize = 15;
+/// Longest command shown for a busy child.
+const COMMAND_MAX_CHARS: usize = 80;
+/// Busy children listed in a refusal.
+const LISTED_CHILDREN: usize = 2;
+/// Foreground colour Claude Code uses for placeholder and suggestion text.
+const GREY_RGB: [u32; 3] = [153, 153, 153];
+
+/// Why the guards are being run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepMode {
+    /// Automatic sweep: every guard applies.
+    Sweep,
+    /// The user asked for this agent to sleep: every safety guard applies,
+    /// except Focused (the user knows what they look at).
+    Manual,
+    /// The user insists: every guard is skipped except "kind not managed",
+    /// because without a Profile there is nothing to do.
+    Force,
+}
+
+/// Why an agent may not sleep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    NotManaged,
+    NoSession,
+    NotSettled(AgentStatus),
+    Focused,
+    NotIncluded,
+    Excluded,
+    CwdExcluded(String),
+    AgentProcessNotFound,
+    ProtectedEnv(String),
+    BusyChildren { count: usize, first: Vec<String> },
+    PromptNotDetected,
+    DraftInPrompt,
+}
+
+impl Refusal {
+    /// Stable kebab-case identifier, safe to store and match on.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Refusal::NotManaged => "not-managed",
+            Refusal::NoSession => "no-session",
+            Refusal::NotSettled(_) => "not-settled",
+            Refusal::Focused => "focused",
+            Refusal::NotIncluded => "not-included",
+            Refusal::Excluded => "excluded",
+            Refusal::CwdExcluded(_) => "cwd-excluded",
+            Refusal::AgentProcessNotFound => "agent-process-not-found",
+            Refusal::ProtectedEnv(_) => "protected-env",
+            Refusal::BusyChildren { .. } => "busy-children",
+            Refusal::PromptNotDetected => "prompt-not-detected",
+            Refusal::DraftInPrompt => "draft-in-prompt",
+        }
+    }
+
+    /// Whether the refusal is too ordinary to log or notify (the pane simply
+    /// does not hold a managed agent).
+    pub fn is_silent(&self) -> bool {
+        matches!(self, Refusal::NotManaged)
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::NotManaged => f.write_str("agent kind is not managed"),
+            Refusal::NoSession => f.write_str("no session id"),
+            Refusal::NotSettled(status) => write!(f, "agent is {status}, not settled"),
+            Refusal::Focused => f.write_str("agent is focused"),
+            Refusal::NotIncluded => f.write_str("name is not in include_names"),
+            Refusal::Excluded => f.write_str("name is in exclude_names"),
+            Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
+            Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
+            Refusal::ProtectedEnv(var) => write!(f, "protected environment variable {var}"),
+            Refusal::BusyChildren { count, first } => {
+                let noun = if *count == 1 { "child" } else { "children" };
+                write!(f, "{count} busy {noun}")?;
+                if !first.is_empty() {
+                    write!(f, ": {}", first.join(", "))?;
+                    if *count > first.len() {
+                        f.write_str(", ...")?;
+                    }
+                }
+                Ok(())
+            }
+            Refusal::PromptNotDetected => f.write_str("prompt not detected on screen"),
+            Refusal::DraftInPrompt => f.write_str("text is typed in the prompt"),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// The outside world the guards look at, queried only when a guard needs it.
+pub trait Probe {
+    /// Foreground processes of the agent's pane.
+    fn process_info(&self) -> Option<ProcessInfo>;
+    /// Environment of process `pid`, `None` when unreadable.
+    fn environment(&self, pid: i32) -> Option<Vec<(String, String)>>;
+    /// The pane's screen as ANSI text, `None` when it cannot be read.
+    fn screen(&self) -> Option<String>;
+}
+
+/// [`Probe`] backed by the real Herdr and the real processes.
+pub struct LiveProbe<'a> {
+    client: &'a HerdrClient,
+    pane: &'a str,
+}
+
+impl<'a> LiveProbe<'a> {
+    pub fn new(client: &'a HerdrClient, pane: &'a str) -> Self {
+        Self { client, pane }
+    }
+}
+
+impl Probe for LiveProbe<'_> {
+    fn process_info(&self) -> Option<ProcessInfo> {
+        self.client.pane_process_info(self.pane).ok()
+    }
+
+    fn environment(&self, pid: i32) -> Option<Vec<(String, String)>> {
+        procs::environment_of(pid).ok()
+    }
+
+    fn screen(&self) -> Option<String> {
+        self.client
+            .pane_read(self.pane, SCREEN_LINES, ReadFormat::Ansi)
+            .ok()
+    }
+}
+
+/// Everything [`check`] needs to know about one agent.
+pub struct GuardContext<'a> {
+    pub config: &'a Config,
+    pub agent: &'a Agent,
+    pub table: &'a ProcessTable,
+    pub probe: &'a dyn Probe,
+}
+
+impl<'a> GuardContext<'a> {
+    pub fn new(
+        config: &'a Config,
+        agent: &'a Agent,
+        table: &'a ProcessTable,
+        probe: &'a dyn Probe,
+    ) -> Self {
+        Self {
+            config,
+            agent,
+            table,
+            probe,
+        }
+    }
+}
+
+/// Run the guards against the real Herdr and process table.
+pub fn check_live(
+    client: &HerdrClient,
+    config: &Config,
+    agent: &Agent,
+    table: &ProcessTable,
+    mode: SleepMode,
+) -> Result<(), Refusal> {
+    let probe = LiveProbe::new(client, &agent.pane_id);
+    check(&GuardContext::new(config, agent, table, &probe), mode)
+}
+
+/// Decide whether the agent may sleep. The first failing guard wins.
+pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
+    let (config, agent) = (ctx.config, ctx.agent);
+
+    let profile = agent
+        .kind()
+        .and_then(|kind| config.profile(kind))
+        .ok_or(Refusal::NotManaged)?;
+    if mode == SleepMode::Force {
+        return Ok(());
+    }
+
+    if agent.session_id().is_none() {
+        return Err(Refusal::NoSession);
+    }
+    if !config.allows_status(agent.agent_status) {
+        return Err(Refusal::NotSettled(agent.agent_status));
+    }
+    if mode == SleepMode::Sweep && agent.focused {
+        return Err(Refusal::Focused);
+    }
+    check_filters(config, agent)?;
+
+    let info = ctx.probe.process_info();
+    let pid = info
+        .as_ref()
+        .and_then(|info| procs::find_agent_process(info, ctx.table, &profile.bin))
+        .ok_or(Refusal::AgentProcessNotFound)?;
+
+    if let Some(environment) = ctx.probe.environment(pid) {
+        if let Some(var) = config
+            .protect_env_vars
+            .iter()
+            .find(|var| environment.iter().any(|(key, _)| key == *var))
+        {
+            return Err(Refusal::ProtectedEnv(var.clone()));
+        }
+    }
+
+    let busy: Vec<&str> = ctx
+        .table
+        .descendants(pid)
+        .into_iter()
+        .map(|entry| entry.command.as_str())
+        .filter(|command| !config.child_ignored(command))
+        .collect();
+    if !busy.is_empty() {
+        return Err(Refusal::BusyChildren {
+            count: busy.len(),
+            first: busy
+                .iter()
+                .take(LISTED_CHILDREN)
+                .map(|command| command.chars().take(COMMAND_MAX_CHARS).collect())
+                .collect(),
+        });
+    }
+
+    match ctx.probe.screen().map(|s| prompt_state(&s, profile)) {
+        None | Some(PromptState::NotFound) => Err(Refusal::PromptNotDetected),
+        Some(PromptState::Draft) => Err(Refusal::DraftInPrompt),
+        Some(PromptState::Empty) => Ok(()),
+    }
+}
+
+fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
+    let name = agent.name.as_deref();
+    let listed = |list: &[String]| name.is_some_and(|n| list.iter().any(|x| x == n));
+    if !config.include_names.is_empty() && !listed(&config.include_names) {
+        return Err(Refusal::NotIncluded);
+    }
+    if listed(&config.exclude_names) {
+        return Err(Refusal::Excluded);
+    }
+    if let Some(cwd) = agent.effective_cwd() {
+        if config.cwd_excluded(cwd) {
+            return Err(Refusal::CwdExcluded(cwd.to_string()));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Prompt analysis
+// ---------------------------------------------------------------------------
+
+/// What the agent's input line holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptState {
+    /// No line of the bottom area matches the Profile's `prompt_regex`.
+    NotFound,
+    /// The prompt is there and nothing (or only a grey suggestion) is typed.
+    Empty,
+    /// The user typed something.
+    Draft,
+}
+
+/// Whether the screen shows the agent at a recognisable prompt.
+pub fn is_ready_screen(screen_ansi: &str, profile: &Profile) -> bool {
+    prompt_state(screen_ansi, profile) != PromptState::NotFound
+}
+
+/// Analyse the prompt of an ANSI screen (see [`PromptState`]).
+pub fn prompt_state(screen_ansi: &str, profile: &Profile) -> PromptState {
+    let lines: Vec<&str> = screen_ansi
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let start = lines.len().saturating_sub(PROMPT_AREA_LINES);
+    lines[start..]
+        .iter()
+        .rev()
+        .find_map(|line| line_state(line, &profile.prompt_regex))
+        .unwrap_or(PromptState::NotFound)
+}
+
+/// One visible character and whether it is drawn dim or grey.
+#[derive(Debug, Clone, Copy)]
+struct Cell {
+    ch: char,
+    dim: bool,
+}
+
+fn is_blank(c: char) -> bool {
+    c.is_whitespace() || c == '\u{00A0}'
+}
+
+fn is_box(c: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&c)
+}
+
+/// The state of one line when it holds the prompt, `None` when it does not.
+fn line_state(line: &str, prompt: &Regex) -> Option<PromptState> {
+    let cells = parse_cells(line);
+    // Skip indentation and a left box border, so `│ ❯ text │` matches too.
+    let lead = cells
+        .iter()
+        .take_while(|c| is_blank(c.ch) || is_box(c.ch))
+        .count();
+    let plain: String = cells[lead..].iter().map(|c| c.ch).collect();
+    let end = prompt.find(&plain)?.end();
+    let marker_chars = plain[..end].chars().count();
+    let input: String = cells[lead + marker_chars..]
+        .iter()
+        .filter(|c| !c.dim)
+        .map(|c| c.ch)
+        .collect();
+    let input = input.trim_end_matches(|c| is_blank(c) || is_box(c));
+    Some(if input.chars().any(|c| !is_blank(c)) {
+        PromptState::Draft
+    } else {
+        PromptState::Empty
+    })
+}
+
+/// Split a line into visible characters with their dim flag. Dim is SGR 2,
+/// or the grey foreground; SGR 0, 22, 39 or another colour ends it.
+fn parse_cells(line: &str) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    let (mut faint, mut grey) = (false, false);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            cells.push(Cell {
+                ch: c,
+                dim: faint || grey,
+            });
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                let mut params = String::new();
+                let mut final_byte = None;
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        final_byte = Some(c);
+                        break;
+                    }
+                    params.push(c);
+                }
+                if final_byte == Some('m') {
+                    apply_sgr(&params, &mut faint, &mut grey);
+                }
+            }
+            // Two-character escape such as `ESC ( B`: drop the next char.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    cells
+}
+
+fn apply_sgr(params: &str, faint: &mut bool, grey: &mut bool) {
+    let codes: Vec<u32> = params
+        .split([';', ':'])
+        .map(|p| p.parse().unwrap_or(0))
+        .collect();
+    let mut i = 0;
+    while i < codes.len() {
+        match codes[i] {
+            0 => (*faint, *grey) = (false, false),
+            2 => *faint = true,
+            22 => *faint = false,
+            39 | 30..=37 | 90..=97 => *grey = false,
+            38 => match codes.get(i + 1) {
+                Some(2) => {
+                    *grey = codes.get(i + 2..i + 5) == Some(&GREY_RGB[..]);
+                    i += 4;
+                }
+                Some(5) => {
+                    *grey = false;
+                    i += 2;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procs::ProcessTable;
+    use std::collections::HashMap;
+
+    /// Expand `\e` into a real escape byte.
+    fn esc(s: &str) -> String {
+        s.replace("\\e", "\u{1b}")
+    }
+
+    fn config() -> Config {
+        Config::default()
+    }
+
+    fn profile(kind: &str) -> Profile {
+        config().profile(kind).unwrap().clone()
+    }
+
+    fn state(screen: &str, kind: &str) -> PromptState {
+        prompt_state(&esc(screen), &profile(kind))
+    }
+
+    // ---- prompt analysis ------------------------------------------------
+
+    const RULE: &str =
+        "\\e[0m\\e[38;2;136;136;136m\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\\e[0m";
+
+    fn claude_screen(prompt_line: &str) -> String {
+        format!(
+            "\\e[0m  done\r\n\r\n{RULE}\r\n{prompt_line}\r\n{RULE}\r\n  \\e[0m\\e[38;5;5m[Model]\\e[0m\r\n  auto mode on"
+        )
+    }
+
+    #[test]
+    fn empty_claude_prompt() {
+        let screen = claude_screen("\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0m");
+        assert_eq!(state(&screen, "claude"), PromptState::Empty);
+        let screen = claude_screen("\\e[0m\\e[38;2;153;153;153m\u{276F} \u{a0}\\e[0m");
+        assert_eq!(state(&screen, "claude"), PromptState::Empty);
+    }
+
+    #[test]
+    fn typed_text_is_a_draft() {
+        let screen = claude_screen("\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0mhello\\e[0m");
+        assert_eq!(state(&screen, "claude"), PromptState::Draft);
+    }
+
+    #[test]
+    fn grey_suggestion_only_is_empty() {
+        let screen = claude_screen(
+            "\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0m\\e[38;2;153;153;153mrun the tests\\e[0m",
+        );
+        assert_eq!(state(&screen, "claude"), PromptState::Empty);
+        let screen = claude_screen("\\e[0m\\e[1m\u{276F}\u{a0}\\e[2mrun the tests\\e[22m");
+        assert_eq!(state(&screen, "claude"), PromptState::Empty);
+        let screen = claude_screen("\\e[0m\u{276F}\u{a0}\\e[2mrun the tests");
+        assert_eq!(state(&screen, "claude"), PromptState::Empty);
+    }
+
+    #[test]
+    fn typed_text_then_dim_suggestion_is_a_draft() {
+        let screen = claude_screen("\\e[0m\u{276F}\u{a0}fix\\e[2m the build\\e[0m");
+        assert_eq!(state(&screen, "claude"), PromptState::Draft);
+    }
+
+    #[test]
+    fn exit_typed_under_open_menu_is_a_draft() {
+        let screen = esc(&format!(
+            "{RULE}\r\n\\e[0m\u{276F}\u{a0}/exit\\e[0m\r\n{RULE}\r\n  \\e[38;2;177;185;249m/exit\\e[0m  Exit the REPL\r\n  /export  Export"
+        ));
+        assert_eq!(
+            prompt_state(&screen, &profile("claude")),
+            PromptState::Draft
+        );
+    }
+
+    #[test]
+    fn box_borders_are_tolerated() {
+        for (line, expected) in [
+            (
+                "\u{2502} \u{276F}\u{a0}        \u{2502}",
+                PromptState::Empty,
+            ),
+            ("\u{2502} \u{276F} hello    \u{2502}", PromptState::Draft),
+            (
+                "\\e[2m\u{2502}\\e[0m \u{276F} \\e[2mtry this\\e[0m \\e[2m\u{2502}\\e[0m",
+                PromptState::Empty,
+            ),
+        ] {
+            assert_eq!(state(line, "claude"), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn no_prompt_is_not_found() {
+        let screen = "\\e[0mcompiling...\r\n\\e[38;2;1;2;3mworking\\e[0m\r\n";
+        assert_eq!(state(screen, "claude"), PromptState::NotFound);
+        assert!(!is_ready_screen(&esc(screen), &profile("claude")));
+        assert_eq!(state("", "claude"), PromptState::NotFound);
+    }
+
+    #[test]
+    fn prompt_above_the_bottom_area_is_ignored() {
+        let mut screen = String::from("\u{276F}\u{a0}\n");
+        screen.push_str(&"output\n".repeat(PROMPT_AREA_LINES));
+        assert_eq!(state(&screen, "claude"), PromptState::NotFound);
+        let near = format!(
+            "\u{276F}\u{a0}\n{}",
+            "output\n".repeat(PROMPT_AREA_LINES - 2)
+        );
+        assert_eq!(state(&near, "claude"), PromptState::Empty);
+    }
+
+    #[test]
+    fn lowest_prompt_line_wins() {
+        let screen = "\u{276F} old message\n\nreply\n\u{276F}\u{a0}\n";
+        assert_eq!(state(screen, "claude"), PromptState::Empty);
+    }
+
+    #[test]
+    fn other_profiles() {
+        assert_eq!(state("\u{203A} \n  gpt-5", "codex"), PromptState::Empty);
+        assert_eq!(
+            state("\u{203A} \\e[2mImprove docs\\e[0m\n", "codex"),
+            PromptState::Empty
+        );
+        assert_eq!(state("\u{203A} fix bug\n", "codex"), PromptState::Draft);
+        assert_eq!(state(" > \n", "gemini"), PromptState::Empty);
+        assert_eq!(
+            state("\u{2502} > ls \u{2502}\n", "gemini"),
+            PromptState::Draft
+        );
+        assert_eq!(state("\u{203A} \n", "gemini"), PromptState::NotFound);
+        assert_eq!(state("\u{2192} \n", "cursor"), PromptState::Empty);
+        assert!(is_ready_screen("> \n", &profile("gemini")));
+    }
+
+    #[test]
+    fn sgr_parsing_details() {
+        let cells = parse_cells(&esc(
+            "\\e[38;5;4ma\\e[38;2;153;153;153mb\\e[39mc\\e[2;22md\\e[?25lx",
+        ));
+        let dims: Vec<bool> = cells.iter().map(|c| c.dim).collect();
+        assert_eq!(dims, [false, true, false, false, false]);
+    }
+
+    // ---- guards ---------------------------------------------------------
+
+    struct FakeProbe {
+        info: Option<ProcessInfo>,
+        env: HashMap<i32, Vec<(String, String)>>,
+        screen: Option<String>,
+    }
+
+    impl Probe for FakeProbe {
+        fn process_info(&self) -> Option<ProcessInfo> {
+            self.info.clone()
+        }
+        fn environment(&self, pid: i32) -> Option<Vec<(String, String)>> {
+            self.env.get(&pid).cloned()
+        }
+        fn screen(&self) -> Option<String> {
+            self.screen.clone()
+        }
+    }
+
+    const AGENT_PID: i32 = 100;
+
+    fn probe(screen: &str) -> FakeProbe {
+        FakeProbe {
+            info: Some(ProcessInfo {
+                pane_id: "w1:p1".into(),
+                shell_pid: 50,
+                foreground_process_group_id: AGENT_PID,
+                foreground_processes: vec![crate::herdr::model::ForegroundProcess {
+                    pid: AGENT_PID,
+                    name: "claude".into(),
+                    cwd: None,
+                }],
+            }),
+            env: HashMap::new(),
+            screen: Some(esc(screen)),
+        }
+    }
+
+    fn empty_screen() -> String {
+        claude_screen("\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0m")
+    }
+
+    fn agent() -> Agent {
+        Agent {
+            pane_id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            agent: Some("claude".into()),
+            agent_status: AgentStatus::Idle,
+            agent_session: Some(crate::herdr::model::AgentSession {
+                source: "herdr:claude".into(),
+                agent: Some("claude".into()),
+                kind: Some("id".into()),
+                value: "sid-1".into(),
+            }),
+            ..Agent::default()
+        }
+    }
+
+    fn table(children: &[&str]) -> ProcessTable {
+        let mut text = String::from("50 1 100 -bash\n100 50 5000 claude\n");
+        for (i, command) in children.iter().enumerate() {
+            text.push_str(&format!("{} 100 10 {command}\n", 200 + i));
+        }
+        ProcessTable::parse(&text)
+    }
+
+    fn run(
+        config: &Config,
+        agent: &Agent,
+        table: &ProcessTable,
+        probe: &FakeProbe,
+        mode: SleepMode,
+    ) -> Result<(), Refusal> {
+        check(&GuardContext::new(config, agent, table, probe), mode)
+    }
+
+    fn sweep(agent: &Agent, children: &[&str], probe: &FakeProbe) -> Result<(), Refusal> {
+        run(&config(), agent, &table(children), probe, SleepMode::Sweep)
+    }
+
+    #[test]
+    fn clean_agent_may_sleep_in_every_mode() {
+        let p = probe(&empty_screen());
+        for mode in [SleepMode::Sweep, SleepMode::Manual, SleepMode::Force] {
+            assert_eq!(run(&config(), &agent(), &table(&[]), &p, mode), Ok(()));
+        }
+    }
+
+    #[test]
+    fn not_managed() {
+        let p = probe(&empty_screen());
+        let mut a = agent();
+        a.agent = Some("mystery".into());
+        for mode in [SleepMode::Sweep, SleepMode::Manual, SleepMode::Force] {
+            let r = run(&config(), &a, &table(&[]), &p, mode);
+            assert_eq!(r, Err(Refusal::NotManaged));
+        }
+        a.agent = None;
+        assert_eq!(sweep(&a, &[], &p), Err(Refusal::NotManaged));
+        assert!(Refusal::NotManaged.is_silent());
+    }
+
+    #[test]
+    fn no_session() {
+        let mut a = agent();
+        a.agent_session = None;
+        assert_eq!(
+            sweep(&a, &[], &probe(&empty_screen())),
+            Err(Refusal::NoSession)
+        );
+    }
+
+    #[test]
+    fn not_settled() {
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Unknown,
+        ] {
+            let mut a = agent();
+            a.agent_status = status;
+            assert_eq!(
+                sweep(&a, &[], &probe(&empty_screen())),
+                Err(Refusal::NotSettled(status))
+            );
+        }
+        let mut a = agent();
+        a.agent_status = AgentStatus::Done;
+        assert_eq!(sweep(&a, &[], &probe(&empty_screen())), Ok(()));
+    }
+
+    #[test]
+    fn focused_in_sweep_only() {
+        let mut a = agent();
+        a.focused = true;
+        let p = probe(&empty_screen());
+        assert_eq!(sweep(&a, &["node server.js"], &p), Err(Refusal::Focused));
+        let t = table(&[]);
+        assert_eq!(run(&config(), &a, &t, &p, SleepMode::Manual), Ok(()));
+    }
+
+    #[test]
+    fn name_filters() {
+        let p = probe(&empty_screen());
+        let t = table(&[]);
+        let mut a = agent();
+        a.name = Some("worker".into());
+
+        let mut c = config();
+        c.include_names = vec!["other".into()];
+        assert_eq!(
+            run(&c, &a, &t, &p, SleepMode::Sweep),
+            Err(Refusal::NotIncluded)
+        );
+        a.name = None;
+        assert_eq!(
+            run(&c, &a, &t, &p, SleepMode::Sweep),
+            Err(Refusal::NotIncluded)
+        );
+
+        let mut c = config();
+        c.exclude_names = vec!["worker".into()];
+        a.name = Some("worker".into());
+        assert_eq!(
+            run(&c, &a, &t, &p, SleepMode::Sweep),
+            Err(Refusal::Excluded)
+        );
+        assert_eq!(run(&c, &a, &t, &p, SleepMode::Force), Ok(()));
+    }
+
+    #[test]
+    fn cwd_excluded() {
+        let mut c = config();
+        c.exclude_cwd_regex = vec![Regex::new("/secret").unwrap()];
+        let mut a = agent();
+        a.cwd = Some("/home/u/secret/app".into());
+        let r = run(
+            &c,
+            &a,
+            &table(&[]),
+            &probe(&empty_screen()),
+            SleepMode::Sweep,
+        );
+        assert_eq!(r, Err(Refusal::CwdExcluded("/home/u/secret/app".into())));
+        assert_eq!(r.unwrap_err().code(), "cwd-excluded");
+    }
+
+    #[test]
+    fn agent_process_not_found() {
+        let mut p = probe(&empty_screen());
+        p.info.as_mut().unwrap().foreground_processes[0].name = "vim".into();
+        let t = ProcessTable::parse("50 1 100 -bash\n100 50 5000 vim\n");
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::AgentProcessNotFound));
+        p.info = None;
+        assert_eq!(sweep(&agent(), &[], &p), Err(Refusal::AgentProcessNotFound));
+    }
+
+    #[test]
+    fn protected_env() {
+        let mut c = config();
+        c.protect_env_vars = vec!["KEEP_AWAKE".into(), "OTHER".into()];
+        let mut p = probe(&empty_screen());
+        p.env.insert(
+            AGENT_PID,
+            vec![("HOME".into(), "/h".into()), ("OTHER".into(), "1".into())],
+        );
+        let t = table(&[]);
+        let r = run(&c, &agent(), &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::ProtectedEnv("OTHER".into())));
+        // Unreadable environment counts as not protected.
+        p.env.clear();
+        assert_eq!(run(&c, &agent(), &t, &p, SleepMode::Sweep), Ok(()));
+        assert_eq!(run(&c, &agent(), &t, &p, SleepMode::Manual), Ok(()));
+    }
+
+    #[test]
+    fn ignored_children_do_not_count() {
+        let p = probe(&empty_screen());
+        let ignored = [
+            "node /opt/mcp-server/index.js",
+            "(grep)",
+            "npm exec some-tool",
+            "typescript-language-server --stdio",
+        ];
+        assert_eq!(sweep(&agent(), &ignored, &p), Ok(()));
+    }
+
+    #[test]
+    fn busy_children_are_listed() {
+        let p = probe(&empty_screen());
+        let r = sweep(
+            &agent(),
+            &["node server.js", "(grep)", "sleep 600", "make"],
+            &p,
+        );
+        let refusal = r.unwrap_err();
+        assert_eq!(
+            refusal,
+            Refusal::BusyChildren {
+                count: 3,
+                first: vec!["node server.js".into(), "sleep 600".into()]
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "3 busy children: node server.js, sleep 600, ..."
+        );
+        let one = sweep(&agent(), &["make"], &p).unwrap_err();
+        assert_eq!(one.to_string(), "1 busy child: make");
+    }
+
+    #[test]
+    fn long_commands_are_truncated() {
+        let long = format!("node {}", "x".repeat(200));
+        let p = probe(&empty_screen());
+        match sweep(&agent(), &[&long], &p).unwrap_err() {
+            Refusal::BusyChildren { first, .. } => {
+                assert_eq!(first[0].chars().count(), COMMAND_MAX_CHARS);
+                assert!(long.starts_with(&first[0]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn busy_children_checked_before_prompt_and_in_manual() {
+        let mut p = probe("no prompt here");
+        let t = table(&["node server.js"]);
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Manual);
+        assert_eq!(r.unwrap_err().code(), "busy-children");
+        p.screen = None;
+        let r = run(&config(), &agent(), &table(&[]), &p, SleepMode::Manual);
+        assert_eq!(r, Err(Refusal::PromptNotDetected));
+    }
+
+    #[test]
+    fn prompt_not_detected_and_draft() {
+        let p = probe("compiling\r\nstill compiling");
+        assert_eq!(sweep(&agent(), &[], &p), Err(Refusal::PromptNotDetected));
+        let draft = claude_screen("\\e[0m\u{276F}\u{a0}half a thought");
+        let p = probe(&draft);
+        assert_eq!(sweep(&agent(), &[], &p), Err(Refusal::DraftInPrompt));
+        // Manual does not skip the draft guard; Force does.
+        let t = table(&[]);
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Manual);
+        assert_eq!(r, Err(Refusal::DraftInPrompt));
+        assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Force), Ok(()));
+    }
+
+    #[test]
+    fn force_skips_everything_but_not_managed() {
+        let mut a = agent();
+        a.agent_session = None;
+        a.agent_status = AgentStatus::Working;
+        a.focused = true;
+        let p = FakeProbe {
+            info: None,
+            env: HashMap::new(),
+            screen: None,
+        };
+        assert_eq!(
+            run(&config(), &a, &table(&["make"]), &p, SleepMode::Force),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn codes_are_stable() {
+        let cases = [
+            (Refusal::NotManaged, "not-managed"),
+            (Refusal::NoSession, "no-session"),
+            (Refusal::NotSettled(AgentStatus::Working), "not-settled"),
+            (Refusal::Focused, "focused"),
+            (Refusal::NotIncluded, "not-included"),
+            (Refusal::Excluded, "excluded"),
+            (Refusal::CwdExcluded("/x".into()), "cwd-excluded"),
+            (Refusal::AgentProcessNotFound, "agent-process-not-found"),
+            (Refusal::ProtectedEnv("V".into()), "protected-env"),
+            (
+                Refusal::BusyChildren {
+                    count: 1,
+                    first: vec![],
+                },
+                "busy-children",
+            ),
+            (Refusal::PromptNotDetected, "prompt-not-detected"),
+            (Refusal::DraftInPrompt, "draft-in-prompt"),
+        ];
+        for (refusal, code) in cases {
+            assert_eq!(refusal.code(), code);
+            assert_eq!(refusal.is_silent(), code == "not-managed");
+            assert!(!refusal.to_string().is_empty());
+        }
+        assert_eq!(
+            Refusal::NotSettled(AgentStatus::Blocked).to_string(),
+            "agent is blocked, not settled"
+        );
+    }
+}
