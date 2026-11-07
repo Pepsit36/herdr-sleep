@@ -163,7 +163,7 @@ fn slow_binary_times_out_and_is_killed() {
 fn large_output_does_not_deadlock() {
     let fake = FakeBinary::new(
         "large",
-        r#"printf '{"result":{"text":"'; i=0; while [ $i -lt 4000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done; printf '"}}'"#,
+        r#"i=0; while [ $i -lt 4000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; i=$((i+1)); done"#,
     );
     let text = fake
         .client()
