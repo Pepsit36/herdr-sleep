@@ -1,4 +1,4 @@
-//! The `sleep`, `wake` and `replay` commands.
+//! The `sleep`, `wake`, `event` and `replay` commands.
 
 use std::process::ExitCode;
 
@@ -7,8 +7,8 @@ use herdr_sleep::guards::SleepMode;
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, WakeOptions, WakeOutcome, replay,
-    sleep_agent, wake_agent,
+    FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, WakeOptions, WakeOutcome,
+    handle_focus_event, replay, sleep_agent, wake_agent,
 };
 use serde_json::json;
 
@@ -62,6 +62,19 @@ pub fn wake(target: &str, wait: bool, json: bool) -> ExitCode {
         println!("{}", describe_wake(label, &outcome, wait));
     }
     wake_exit_code(&outcome)
+}
+
+/// Run `herdr-sleep event`, the command of the focus hooks. Silent and always
+/// successful: a hook must never fail loudly, the journal holds the outcome.
+pub fn event() -> ExitCode {
+    let event = FocusEvent::from_env(|key| std::env::var(key).ok());
+    let config = Config::load().unwrap_or_else(|error| {
+        eprintln!("herdr-sleep: {error}");
+        Config::default()
+    });
+    let env = LiveEnv::new(HerdrClient::from_env());
+    handle_focus_event(&env, &config, &event);
+    ExitCode::SUCCESS
 }
 
 /// One plain-text line for a wake outcome.

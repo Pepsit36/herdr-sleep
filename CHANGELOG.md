@@ -28,3 +28,4 @@ a published entry is frozen, typo included.
 - The `herdr-sleep sleep <pane|name>` command puts an idle agent to sleep: it quits the agent with its own exit command (never a signal) and keeps the pane, its name and its session.
 - **Wake:** `herdr-sleep wake <pane|name>` wakes a sleeping agent: any focus, key or prompt wakes a
   sleeping pane, and what was typed meanwhile is replayed into the agent once it is ready.
+- **Focus wake:** focusing a sleeping pane, or its tab or space, wakes that pane only.

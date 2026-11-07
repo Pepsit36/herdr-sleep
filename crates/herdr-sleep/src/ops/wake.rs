@@ -299,6 +299,10 @@ pub(super) mod tests {
     }
 
     impl Env for Fake {
+        fn snapshot(&self) -> EnvResult<crate::herdr::Snapshot> {
+            unreachable!()
+        }
+
         fn pane(&self, _: &str) -> EnvResult<Pane> {
             unreachable!("wake does not read panes")
         }

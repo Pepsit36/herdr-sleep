@@ -524,6 +524,10 @@ mod tests {
     }
 
     impl Env for Fake {
+        fn snapshot(&self) -> EnvResult<crate::herdr::Snapshot> {
+            unreachable!()
+        }
+
         fn pane(&self, pane: &str) -> EnvResult<Pane> {
             self.log(format!("pane {pane}"));
             let released = self.identity_released();
