@@ -25,6 +25,11 @@ Commands:
                    prompt is back); --no-wait returns right away. --json
                    prints woke, pane, name, ms and reason
 
+  event            Command of the pane.focused, tab.focused and workspace.focused
+                   hooks: wakes the focused pane when it sleeps (that pane
+                   only). Reads the HERDR_PLUGIN_* variables, prints nothing
+                   and always exits 0
+
 Options:
   -h, --help       Print this help and exit
   -V, --version    Print the version and exit
@@ -52,6 +57,8 @@ enum Invocation {
         wait: bool,
         json: bool,
     },
+    /// The focus hooks.
+    Event,
     /// Internal: started by the Placeholder to type the Captured input into
     /// the woken Agent. Not part of the usage text.
     ///
@@ -69,6 +76,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         Some("-V") | Some("--version") | Some("version") => Invocation::Version,
         Some("sleep") => parse_sleep(args),
         Some("wake") => parse_wake(args),
+        Some("event") => match args.next() {
+            None => Invocation::Event,
+            Some(extra) => Invocation::Usage(format!("event: takes no argument, got '{extra}'")),
+        },
         Some("replay") => parse_replay(args),
         Some(other) => Invocation::Unknown(other.to_string()),
     }
@@ -152,6 +163,7 @@ fn main() -> ExitCode {
         }
         Invocation::Sleep { target, force } => cli::sleep(&target, force),
         Invocation::Wake { target, wait, json } => cli::wake(&target, wait, json),
+        Invocation::Event => cli::event(),
         Invocation::Replay(args) => cli::replay_command(&args),
         Invocation::Usage(message) => {
             eprintln!("herdr-sleep: {message}\n");
@@ -227,6 +239,12 @@ mod tests {
         assert!(matches!(parse(&["wake"]), Invocation::Usage(_)));
         assert!(matches!(parse(&["wake", "a", "b"]), Invocation::Usage(_)));
         assert!(matches!(parse(&["wake", "-x", "a"]), Invocation::Usage(_)));
+    }
+
+    #[test]
+    fn event_takes_no_argument() {
+        assert_eq!(parse(&["event"]), Invocation::Event);
+        assert!(matches!(parse(&["event", "x"]), Invocation::Usage(_)));
     }
 
     #[test]

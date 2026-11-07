@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Focus wake:** focusing a sleeping pane, or its tab or space, wakes that pane only.
+
 ## [0.1.0] - 2026-11-07
 
 <!-- stamped -->

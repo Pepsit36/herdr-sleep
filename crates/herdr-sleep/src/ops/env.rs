@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{self, Config};
 use crate::guards::{self, Refusal, SleepMode};
-use crate::herdr::{Agent, HerdrClient, Pane, ProcessInfo, ReadFormat};
+use crate::herdr::{Agent, HerdrClient, Pane, ProcessInfo, ReadFormat, Snapshot};
 use crate::procs::{self, ProcessTable};
 
 /// File name of the Placeholder binary, installed next to `herdr-sleep`.
@@ -18,6 +18,8 @@ pub type EnvResult<T> = Result<T, String>;
 
 /// Everything an operation reads from or does to the world.
 pub trait Env {
+    /// Herdr's view of the whole session.
+    fn snapshot(&self) -> EnvResult<Snapshot>;
     /// Herdr's view of one pane.
     fn pane(&self, pane: &str) -> EnvResult<Pane>;
     /// Herdr's view of the agent in a pane, by pane id or agent name.
@@ -110,6 +112,10 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 impl Env for LiveEnv {
+    fn snapshot(&self) -> EnvResult<Snapshot> {
+        self.client.snapshot().map_err(message)
+    }
+
     fn pane(&self, pane: &str) -> EnvResult<Pane> {
         self.client.pane_get(pane).map_err(message)
     }
