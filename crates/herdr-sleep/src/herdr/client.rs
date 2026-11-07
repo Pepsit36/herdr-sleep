@@ -459,25 +459,26 @@ impl HerdrClient {
 
     /// `herdr pane read <pane> --lines <n> --format <format>`: the last
     /// `lines` rows of the pane's recent output.
+    ///
+    /// Unlike every other command, `pane read` prints the captured screen as
+    /// plain text on stdout, not as JSON. Errors still arrive as JSON.
     pub fn pane_read(
         &self,
         pane: &str,
         lines: usize,
         format: ReadFormat,
     ) -> Result<String, HerdrError> {
-        let lines = lines.to_string();
-        let result = self.call(&[
+        let args = strings(&[
             "pane",
             "read",
             pane,
             "--lines",
-            &lines,
+            &lines.to_string(),
             "--format",
             format.as_flag_value(),
-        ])?;
-        extract_read_text(&result).ok_or_else(|| {
-            HerdrError::missing("pane read", "text in result (text, content or lines)")
-        })
+        ]);
+        let output = self.runner.run(&self.binary, &args, self.timeout)?;
+        interpret_raw_output(&output)
     }
 
     // Actions ------------------------------------------------------------
@@ -716,35 +717,19 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Pull the captured text out of a `pane read` result.
-///
-/// The result is read defensively because its exact layout is not pinned
-/// down: a string field named `text` or `content` is taken as is, a `lines`
-/// array of strings is joined with newlines, a bare string result is taken
-/// whole, and the same lookup is repeated one level down (for a result
-/// wrapped in an object such as `output` or `read`).
-pub fn extract_read_text(result: &Value) -> Option<String> {
-    fn direct(value: &Value) -> Option<String> {
-        if let Some(text) = value.as_str() {
-            return Some(text.to_string());
-        }
-        let object = value.as_object()?;
-        for key in ["text", "content"] {
-            if let Some(text) = object.get(key).and_then(Value::as_str) {
-                return Some(text.to_string());
-            }
-        }
-        let lines = object.get("lines")?.as_array()?;
-        let lines: Option<Vec<&str>> = lines.iter().map(Value::as_str).collect();
-        lines.map(|lines| lines.join("\n"))
+/// Interpret the output of a command that prints plain text on success
+/// (`pane read`): stdout is returned untouched on a zero exit status, and a
+/// failure is mapped like [`interpret_output`] does (a JSON error document
+/// on stdout or stderr, else an exec error).
+pub fn interpret_raw_output(output: &CommandOutput) -> Result<String, HerdrError> {
+    if output.status == Some(0) {
+        return Ok(output.stdout.clone());
     }
-
-    direct(result).or_else(|| {
-        result
-            .as_object()?
-            .values()
-            .filter(|v| v.is_object())
-            .find_map(direct)
+    interpret_output(output).and_then(|_| {
+        Err(HerdrError::Exec {
+            status: output.status,
+            stderr: output.stderr.trim().to_string(),
+        })
     })
 }
 
@@ -1037,35 +1022,43 @@ mod tests {
     }
 
     #[test]
-    fn pane_read_argv_and_text_shapes() {
-        for (stdout, expected) in [
-            (r#"{"result":{"text":"a\nb"}}"#, "a\nb"),
-            (r#"{"result":{"content":"c"}}"#, "c"),
-            (r#"{"result":{"lines":["l1","l2"]}}"#, "l1\nl2"),
-            (r#"{"result":{"output":{"text":"nested"}}}"#, "nested"),
-            (r#"{"result":"bare"}"#, "bare"),
-        ] {
-            let runner = RecordingRunner::with_stdout(stdout);
-            let client = HerdrClient::with_runner("herdr", runner.clone());
-            assert_eq!(
-                client.pane_read("w1:p1", 40, ReadFormat::Text).unwrap(),
-                expected
-            );
-            assert_eq!(
-                runner.argv(),
-                v(&["pane", "read", "w1:p1", "--lines", "40", "--format", "text"])
-            );
-        }
-        let runner = RecordingRunner::with_stdout(r#"{"result":{"rows":3}}"#);
+    fn pane_read_returns_stdout_untouched() {
+        let screen = "line one\n  \u{1b}[2mdim\u{1b}[0m\n\u{276f} \n";
+        let runner = RecordingRunner::with_stdout(screen);
         let client = HerdrClient::with_runner("herdr", runner.clone());
+        assert_eq!(
+            client.pane_read("w1:p1", 40, ReadFormat::Ansi).unwrap(),
+            screen
+        );
+        assert_eq!(
+            runner.argv(),
+            v(&["pane", "read", "w1:p1", "--lines", "40", "--format", "ansi"])
+        );
+    }
+
+    #[test]
+    fn raw_output_errors_follow_the_json_rules() {
+        let failed = |status, stdout: &str, stderr: &str| CommandOutput {
+            status,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        let api = interpret_raw_output(&failed(
+            Some(1),
+            "",
+            r#"{"error":{"code":"pane_not_found","message":"no pane"}}"#,
+        ));
+        assert!(matches!(api, Err(HerdrError::Api { ref code, .. }) if code == "pane_not_found"));
+        let exec = interpret_raw_output(&failed(Some(2), "", "boom\n"));
         assert!(matches!(
-            client.pane_read("w1:p1", 5, ReadFormat::Ansi),
-            Err(HerdrError::Decode {
-                context: "pane read",
+            exec,
+            Err(HerdrError::Exec {
+                status: Some(2),
                 ..
             })
         ));
-        assert_eq!(runner.argv()[6], "ansi");
+        let signal = interpret_raw_output(&failed(None, "partial", ""));
+        assert!(matches!(signal, Err(HerdrError::Exec { status: None, .. })));
     }
 
     #[test]
@@ -1351,25 +1344,6 @@ mod tests {
         assert_eq!(
             argv_of(|c| c.notify("-title", "b").unwrap()),
             v(&["notification", "show", "--body", "b", "--", "-title"])
-        );
-    }
-
-    #[test]
-    fn extract_read_text_shapes() {
-        use serde_json::json;
-        assert_eq!(
-            extract_read_text(&json!({"text": "t"})).as_deref(),
-            Some("t")
-        );
-        assert_eq!(extract_read_text(&json!({"lines": ["a", 1]})), None);
-        assert_eq!(
-            extract_read_text(&json!({"lines": []})).as_deref(),
-            Some("")
-        );
-        assert_eq!(extract_read_text(&json!(42)), None);
-        assert_eq!(
-            extract_read_text(&json!({"a": {"b": {"text": "deep"}}})),
-            None
         );
     }
 }
