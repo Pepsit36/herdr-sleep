@@ -1,0 +1,67 @@
+      1       0 12504 /sbin/init
+      2       1  2208 /init
+      6       2  2148 plan9 --control-socket 7 --log-level 4 --server-fd 8 --pipe-fd 10 --log-truncate
+     40       1 16052 /lib/systemd/systemd-journald
+     64       1  6540 /lib/systemd/systemd-udevd
+    160       1  2284 /usr/sbin/cron -f
+    161       1  4580 /usr/bin/dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+    164       1 29148 php-fpm: master process (/etc/php/8.4/fpm/php-fpm.conf)
+    169       1  5064 /usr/sbin/rsyslogd -n -iNONE
+    170       1 32656 /usr/lib/snapd/snapd
+    181       1  8104 /lib/systemd/systemd-logind
+    201       1  1928 /sbin/agetty -o -p -- \u --noclear - linux
+    217       1 37412 /usr/bin/containerd
+    248       1 31928 /usr/sbin/apache2 -k start
+    249       1 81884 /usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock
+    285     164  8164 php-fpm: pool www
+    286     164  8164 php-fpm: pool www
+    318     248 10100 /usr/sbin/apache2 -k start
+    319     248 10100 /usr/sbin/apache2 -k start
+    320     248 10100 /usr/sbin/apache2 -k start
+    321     248 10100 /usr/sbin/apache2 -k start
+    322     248 10100 /usr/sbin/apache2 -k start
+    636       2  1116 /init
+    637     636  1256 /init
+    638     637  8424 -fish
+    639       2  5456 /bin/login -f
+    647       1 11080 /lib/systemd/systemd --user
+    648     647  5220 (sd-pam)
+    673     639  7320 -fish
+    692       1  3328 /usr/libexec/rtkit-daemon
+    695       1  8664 /usr/lib/polkit-1/polkitd --no-debug
+ 148700     647  4252 /usr/bin/dbus-daemon --session --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+ 148864     647  7828 /usr/libexec/at-spi-bus-launcher
+ 149088     647 12268 /usr/libexec/xdg-desktop-portal
+ 149103     647  7340 /usr/libexec/xdg-document-portal
+ 149107     647  6416 /usr/libexec/xdg-permission-store
+ 149113  149103  1780 fusermount3 -o rw,nosuid,nodev,fsname=portal,auto_unmount,subtype=portal -- /run/user/1000/doc
+ 149116     647 26856 /usr/libexec/xdg-desktop-portal-gtk
+ 149196  148864  4028 /usr/bin/dbus-daemon --config-file=/usr/share/defaults/at-spi2/accessibility.conf --nofork --print-address 11 --address=unix:path=/run/user/1000/at-spi/bus
+ 149199     647  7728 /usr/libexec/at-spi2-registryd --use-gnome-session
+ 183872     638 18348 herdr
+ 183873  183872 31664 /home/user/.local/bin/herdr server
+ 183895  183873  7844 /usr/bin/fish
+ 183898  183873  7816 /usr/bin/fish
+ 183901  183873  7776 /usr/bin/fish
+ 183904  183873  7852 /usr/bin/fish
+ 183907  183873  8076 /usr/bin/fish
+ 184039  183873  8136 /usr/bin/fish
+ 184059  184039 300732 claude --resume 11111111-2222-4333-8444-555555555555
+ 184060  183873  8072 /usr/bin/fish
+ 184082  184060 317716 claude --resume 11111111-2222-4333-8444-555555555555
+ 184083  183873  8120 /usr/bin/fish
+ 184112  184083 310860 claude --resume 11111111-2222-4333-8444-555555555555
+ 184114  183873  8184 /usr/bin/fish
+ 184144  184114 289340 claude --resume 11111111-2222-4333-8444-555555555555
+ 184145  183873  8104 /usr/bin/fish
+ 184180  184145 295816 claude --resume 11111111-2222-4333-8444-555555555555
+ 184186  183873  8132 /usr/bin/fish
+ 184214  184186 458752 claude --resume 11111111-2222-4333-8444-555555555555
+ 203817  184214  6208 /bin/bash -c for i in 1 2 3; do sleep 20; done
+ 204577  203817  1916 sleep 20
+ 204741  184214  6216 /bin/bash -c for i in 1 2 3; do sleep 20; done
+ 204775  184214  1720 /bin/sh -c bash ~/scripts/statusline.sh
+ 204776  204775  3388 bash /home/user/scripts/statusline.sh
+ 204782  204776  3340 bash /home/user/scripts/usage.sh
+ 204785  204782  8200 python3 -c import json, sys; print(json.load(sys.stdin))
+ 204787  204741  4796 ps -axo pid=,ppid=,rss=,command=
