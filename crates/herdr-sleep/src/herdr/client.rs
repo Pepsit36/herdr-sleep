@@ -152,16 +152,10 @@ impl CommandRunner for ProcessRunner {
         args: &[String],
         timeout: Duration,
     ) -> Result<CommandOutput, HerdrError> {
-        let mut child = Command::new(binary)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| HerdrError::Spawn {
-                binary: binary.to_path_buf(),
-                source,
-            })?;
+        let mut child = spawn_with_retry(binary, args).map_err(|source| HerdrError::Spawn {
+            binary: binary.to_path_buf(),
+            source,
+        })?;
 
         // Both pipes are drained from their own thread so a chatty command
         // never blocks on a full pipe while we wait for it to exit.
@@ -190,6 +184,33 @@ impl CommandRunner for ProcessRunner {
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
+    }
+}
+
+/// Spawn `binary`, retrying a few times while the kernel reports it as busy.
+///
+/// A freshly written executable (an update that just replaced the binary, or
+/// a script created by a test) can be refused with "text file busy" for a
+/// moment if another thread of this process forked while it was open for
+/// writing. The condition clears on its own within milliseconds.
+fn spawn_with_retry(binary: &Path, args: &[String]) -> std::io::Result<Child> {
+    let mut attempts = 0;
+    loop {
+        let spawned = Command::new(binary)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        match spawned {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 10 =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => return other,
+        }
     }
 }
 
