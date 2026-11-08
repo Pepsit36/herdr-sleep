@@ -14,10 +14,6 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
-### Added
-
-- **Sidebar markers:** a sleeping pane or a fully sleeping space shows a `$sleep` sidebar token (name and icon configurable), and a fully sleeping tab gets the icon as a label prefix (`tab_prefix`, on by default).
-
 ## [0.1.0] - 2026-11-08
 
 <!-- stamped -->
@@ -37,3 +33,4 @@ a published entry is frozen, typo included.
   watcher that starts with Herdr and restarts itself when it is missing; `herdr-sleep sweep` runs
   one pass on demand.
 - **Installation:** install Herdr Sleep as a Herdr plugin with `herdr plugin install Pepsit36/herdr-sleep`. The install downloads the prebuilt binaries of the release (checksum verified) and falls back to building from source with cargo when none matches your platform or you are offline. The plugin adds the actions `sleep`, `wake`, `sweep`, `status` and `ensure-watcher`, starts its watcher with Herdr and wakes the focused pane on focus.
+- **Sidebar markers:** a sleeping pane or a fully sleeping space shows a `$sleep` sidebar token (name and icon configurable), and a fully sleeping tab gets the icon as a label prefix (`tab_prefix`, on by default).
