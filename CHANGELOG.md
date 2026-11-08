@@ -14,6 +14,12 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic sleep:** idle agents are put to sleep after `sleep_after_minutes`, by a background
+  watcher that starts with Herdr and restarts itself when it is missing; `herdr-sleep sweep` runs
+  one pass on demand.
+
 ## [0.1.0] - 2026-11-07
 
 <!-- stamped -->

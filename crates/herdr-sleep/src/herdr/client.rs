@@ -409,6 +409,14 @@ impl HerdrClient {
         interpret_output(&output)
     }
 
+    /// Whether `herdr status` runs and exits with status 0. Its output is not
+    /// read: a server that answers is enough.
+    pub fn status_ok(&self) -> bool {
+        self.runner
+            .run(&self.binary, &["status".to_string()], self.timeout)
+            .is_ok_and(|output| output.status == Some(0))
+    }
+
     /// Run a call and deserialise `result.<key>`.
     fn fetch<T: DeserializeOwned>(
         &self,

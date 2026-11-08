@@ -1,4 +1,5 @@
-//! The `sleep`, `wake`, `event` and `replay` commands.
+//! The `sleep`, `wake`, `event`, `sweep`, `watch`, `ensure-watcher` and
+//! `replay` commands.
 
 use std::process::ExitCode;
 
@@ -7,13 +8,15 @@ use herdr_sleep::guards::SleepMode;
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, WakeOptions, WakeOutcome,
-    handle_focus_event, replay, sleep_agent, wake_agent,
+    FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, SweepReport, SweepState,
+    WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent, sweep_once, wake_agent,
 };
+use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
 
 /// Run `herdr-sleep sleep <pane|name> [--force]`.
 pub fn sleep(target: &str, force: bool) -> ExitCode {
+    watcher::ensure_watcher_logged();
     let client = HerdrClient::from_env();
     let agent = match client.agent_get(target) {
         Ok(agent) => agent,
@@ -42,6 +45,7 @@ pub fn sleep(target: &str, force: bool) -> ExitCode {
 
 /// Run `herdr-sleep wake <pane|name> [--no-wait] [--json]`.
 pub fn wake(target: &str, wait: bool, json: bool) -> ExitCode {
+    watcher::ensure_watcher_logged();
     let client = HerdrClient::from_env();
     let agent = client.agent_get(target).ok();
     let config = match Config::load() {
@@ -67,6 +71,7 @@ pub fn wake(target: &str, wait: bool, json: bool) -> ExitCode {
 /// Run `herdr-sleep event`, the command of the focus hooks. Silent and always
 /// successful: a hook must never fail loudly, the journal holds the outcome.
 pub fn event() -> ExitCode {
+    watcher::ensure_watcher_logged();
     let event = FocusEvent::from_env(|key| std::env::var(key).ok());
     let config = Config::load().unwrap_or_else(|error| {
         eprintln!("herdr-sleep: {error}");
@@ -75,6 +80,113 @@ pub fn event() -> ExitCode {
     let env = LiveEnv::new(HerdrClient::from_env());
     handle_focus_event(&env, &config, &event);
     ExitCode::SUCCESS
+}
+
+/// Run `herdr-sleep sweep [--json]`: one Sweep in the foreground.
+pub fn sweep(json: bool) -> ExitCode {
+    watcher::ensure_watcher_logged();
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("herdr-sleep: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let env = LiveEnv::new(HerdrClient::from_env());
+    let mut state = herdr_sleep::ops::Env::state_dir(&env)
+        .map(|dir| SweepState::load(&dir))
+        .unwrap_or_default();
+    let report = sweep_once(&env, &config, &mut state);
+    if json {
+        match serde_json::to_string(&report) {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("herdr-sleep: cannot print the report: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        for line in describe_sweep(&report) {
+            println!("{line}");
+        }
+    }
+    if report.error.is_some() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// One line per decision of a Sweep, or a single line when there was none.
+pub fn describe_sweep(report: &SweepReport) -> Vec<String> {
+    if let Some(error) = &report.error {
+        return vec![format!("sweep failed: {error}")];
+    }
+    let mut lines = Vec::new();
+    lines.extend(report.slept.iter().map(|pane| format!("{pane} is asleep")));
+    lines.extend(
+        report
+            .dry_run
+            .iter()
+            .map(|pane| format!("{pane} would be put to sleep (dry run)")),
+    );
+    lines.extend(
+        report
+            .refused
+            .iter()
+            .map(|(pane, code)| format!("{pane} stays awake: {code}")),
+    );
+    lines.extend(
+        report
+            .aborted
+            .iter()
+            .map(|(pane, reason)| format!("{pane} stays awake: {reason}")),
+    );
+    if report.deferred > 0 {
+        lines.push(format!(
+            "{} more due, left for the next pass",
+            report.deferred
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(format!(
+            "nothing to put to sleep ({} agents considered)",
+            report.considered
+        ));
+    }
+    lines
+}
+
+/// Run `herdr-sleep watch [--detach]`.
+pub fn watch(detach: bool) -> ExitCode {
+    if detach {
+        return ensure_watcher();
+    }
+    match watcher::watch() {
+        WatchEnd::AlreadyRunning | WatchEnd::Exited(_) => ExitCode::SUCCESS,
+        WatchEnd::Failed(reason) => {
+            eprintln!("herdr-sleep: watcher: {reason}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run `herdr-sleep ensure-watcher`.
+pub fn ensure_watcher() -> ExitCode {
+    match watcher::ensure_watcher() {
+        Ensure::AlreadyRunning => {
+            println!("watcher is already running");
+            ExitCode::SUCCESS
+        }
+        Ensure::Started => {
+            println!("watcher started");
+            ExitCode::SUCCESS
+        }
+        Ensure::Failed(reason) => {
+            eprintln!("herdr-sleep: watcher: {reason}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// One plain-text line for a wake outcome.
@@ -234,6 +346,32 @@ mod tests {
         assert_eq!(wake_exit_code(&WakeOutcome::NotSleeping), ExitCode::SUCCESS);
         assert_eq!(wake_exit_code(&WakeOutcome::NotFound), ExitCode::from(1));
         assert_eq!(wake_exit_code(&WakeOutcome::TimedOut), ExitCode::from(2));
+    }
+
+    #[test]
+    fn sweep_lines() {
+        let report = SweepReport {
+            considered: 3,
+            slept: vec!["p1".into()],
+            refused: vec![("p2".into(), "focused".into())],
+            deferred: 2,
+            ..SweepReport::default()
+        };
+        assert_eq!(
+            describe_sweep(&report),
+            [
+                "p1 is asleep",
+                "p2 stays awake: focused",
+                "2 more due, left for the next pass"
+            ]
+        );
+        assert_eq!(
+            describe_sweep(&SweepReport {
+                considered: 4,
+                ..SweepReport::default()
+            }),
+            ["nothing to put to sleep (4 agents considered)"]
+        );
     }
 
     #[test]

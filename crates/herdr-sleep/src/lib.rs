@@ -8,6 +8,7 @@
 //!   output, and holds the typed models of what Herdr reports.
 //! - [`journal`] is the append-only log of what the plugin did and why.
 //! - [`ops`] holds the operations that change panes, starting with Sleep.
+//! - [`watcher`] is the background process that runs a Sweep on a timer.
 //! - [`procs`] inspects the processes behind a pane (process tree, memory,
 //!   environment) on Linux and macOS without any extra crate.
 
@@ -17,3 +18,4 @@ pub mod herdr;
 pub mod journal;
 pub mod ops;
 pub mod procs;
+pub mod watcher;

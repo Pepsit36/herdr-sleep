@@ -25,6 +25,15 @@ Commands:
                    prompt is back); --no-wait returns right away. --json
                    prints woke, pane, name, ms and reason
 
+  sweep [--json]   Run one Sweep now: put to sleep every agent idle for
+                   sleep_after_minutes. --json prints the report
+
+  watch [--detach] Run the Watcher, which sweeps every sweep_interval_seconds
+                   (the startup command; --detach starts it in the
+                   background and returns). Only one runs at a time
+
+  ensure-watcher   Start the Watcher unless it is already running
+
   event            Command of the pane.focused, tab.focused and workspace.focused
                    hooks: wakes the focused pane when it sleeps (that pane
                    only). Reads the HERDR_PLUGIN_* variables, prints nothing
@@ -59,6 +68,13 @@ enum Invocation {
     },
     /// The focus hooks.
     Event,
+    Sweep {
+        json: bool,
+    },
+    Watch {
+        detach: bool,
+    },
+    EnsureWatcher,
     /// Internal: started by the Placeholder to type the Captured input into
     /// the woken Agent. Not part of the usage text.
     ///
@@ -79,6 +95,14 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         Some("event") => match args.next() {
             None => Invocation::Event,
             Some(extra) => Invocation::Usage(format!("event: takes no argument, got '{extra}'")),
+        },
+        Some("sweep") => parse_sweep(args),
+        Some("watch") => parse_watch(args),
+        Some("ensure-watcher") => match args.next() {
+            None => Invocation::EnsureWatcher,
+            Some(extra) => {
+                Invocation::Usage(format!("ensure-watcher: takes no argument, got '{extra}'"))
+            }
         },
         Some("replay") => parse_replay(args),
         Some(other) => Invocation::Unknown(other.to_string()),
@@ -124,6 +148,30 @@ fn parse_wake(args: impl Iterator<Item = String>) -> Invocation {
     }
 }
 
+fn parse_sweep(args: impl Iterator<Item = String>) -> Invocation {
+    let mut json = false;
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            return Invocation::Usage(format!("sweep: unknown argument '{arg}'"));
+        }
+    }
+    Invocation::Sweep { json }
+}
+
+fn parse_watch(args: impl Iterator<Item = String>) -> Invocation {
+    let mut detach = false;
+    for arg in args {
+        if arg == "--detach" {
+            detach = true;
+        } else {
+            return Invocation::Usage(format!("watch: unknown argument '{arg}'"));
+        }
+    }
+    Invocation::Watch { detach }
+}
+
 fn parse_replay(args: impl Iterator<Item = String>) -> Invocation {
     let (mut pane, mut name, mut kind, mut file) = (None, None, None, None);
     let mut args = args;
@@ -164,6 +212,9 @@ fn main() -> ExitCode {
         Invocation::Sleep { target, force } => cli::sleep(&target, force),
         Invocation::Wake { target, wait, json } => cli::wake(&target, wait, json),
         Invocation::Event => cli::event(),
+        Invocation::Sweep { json } => cli::sweep(json),
+        Invocation::Watch { detach } => cli::watch(detach),
+        Invocation::EnsureWatcher => cli::ensure_watcher(),
         Invocation::Replay(args) => cli::replay_command(&args),
         Invocation::Usage(message) => {
             eprintln!("herdr-sleep: {message}\n");
@@ -245,6 +296,27 @@ mod tests {
     fn event_takes_no_argument() {
         assert_eq!(parse(&["event"]), Invocation::Event);
         assert!(matches!(parse(&["event", "x"]), Invocation::Usage(_)));
+    }
+
+    #[test]
+    fn sweep_and_watch_options() {
+        assert_eq!(parse(&["sweep"]), Invocation::Sweep { json: false });
+        assert_eq!(
+            parse(&["sweep", "--json"]),
+            Invocation::Sweep { json: true }
+        );
+        assert!(matches!(parse(&["sweep", "x"]), Invocation::Usage(_)));
+        assert_eq!(parse(&["watch"]), Invocation::Watch { detach: false });
+        assert_eq!(
+            parse(&["watch", "--detach"]),
+            Invocation::Watch { detach: true }
+        );
+        assert!(matches!(parse(&["watch", "-x"]), Invocation::Usage(_)));
+        assert_eq!(parse(&["ensure-watcher"]), Invocation::EnsureWatcher);
+        assert!(matches!(
+            parse(&["ensure-watcher", "x"]),
+            Invocation::Usage(_)
+        ));
     }
 
     #[test]
