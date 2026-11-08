@@ -97,6 +97,8 @@ esac
             .arg("wake")
             .args(args)
             .env("HERDR_BIN_PATH", self.path("herdr"))
+            // No socket, no Watcher: these tests must not start one.
+            .env_remove("HERDR_SOCKET_PATH")
             .env("HERDR_SLEEP_STATE_DIR", self.path("state"))
             .env("HERDR_SLEEP_CONFIG_DIR", self.path("config"))
             .output()

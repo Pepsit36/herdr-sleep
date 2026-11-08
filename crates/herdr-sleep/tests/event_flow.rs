@@ -86,6 +86,8 @@ esac
         Command::new(env!("CARGO_BIN_EXE_herdr-sleep"))
             .arg("event")
             .env("HERDR_BIN_PATH", self.path("herdr"))
+            // No socket, no Watcher: these tests must not start one.
+            .env_remove("HERDR_SOCKET_PATH")
             .env("HERDR_SLEEP_STATE_DIR", self.path("state"))
             .env("HERDR_SLEEP_CONFIG_DIR", self.path("config"))
             .env("HERDR_PLUGIN_EVENT", name)
