@@ -401,3 +401,146 @@ fn build_fails_clearly_without_release_and_without_cargo() {
     assert!(err.contains("/releases"), "{err}");
     assert!(!sb.repo.join("bin").exists());
 }
+
+// ---------------------------------------------------------------- make dist
+
+fn make_available() -> bool {
+    if find_tool("make").is_none() {
+        eprintln!("skipping make dist test: make is not installed");
+        return false;
+    }
+    true
+}
+
+fn make_dist(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("make")
+        .arg("dist")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("MAKEFLAGS")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn make_dist_names_the_archive_of_every_release_target() {
+    if !make_available() {
+        return;
+    }
+    let cases = [
+        ("x86_64-unknown-linux-musl", "linux-x86_64"),
+        ("aarch64-unknown-linux-musl", "linux-aarch64"),
+        ("x86_64-apple-darwin", "macos-x86_64"),
+        ("aarch64-apple-darwin", "macos-aarch64"),
+    ];
+    for (triple, suffix) in cases {
+        let target = format!("TARGET={triple}");
+        let out = Command::new("make")
+            .args(["-n", "dist", &target, "VERSION=1.2.3"])
+            .current_dir(repo_root())
+            .env_remove("MAKEFLAGS")
+            .output()
+            .unwrap();
+        let plan = String::from_utf8_lossy(&out.stdout);
+        let name = format!("herdr-sleep-1.2.3-{suffix}.tar.gz");
+        assert!(out.status.success(), "{triple}: {plan}");
+        assert!(
+            plan.contains(&format!(
+                "tar -czf dist/{name} -C target/{triple}/release herdr-sleep herdr-sleep-ph"
+            )),
+            "{plan}"
+        );
+        assert!(plan.contains(&format!("> {name}.sha256")), "{plan}");
+    }
+    let refused = Command::new("make")
+        .args(["-n", "dist", "TARGET=x86_64-pc-windows-msvc"])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+}
+
+#[test]
+fn make_dist_without_a_target_packages_target_release() {
+    if !make_available() {
+        return;
+    }
+    let out = Command::new("make")
+        .args(["-n", "dist"])
+        .current_dir(repo_root())
+        .env_remove("MAKEFLAGS")
+        .output()
+        .unwrap();
+    let plan = String::from_utf8_lossy(&out.stdout);
+    let (os, arch) = os_arch();
+    assert!(
+        plan.contains(&format!(
+            "-{os}-{arch}.tar.gz -C target/release herdr-sleep herdr-sleep-ph"
+        )),
+        "{plan}"
+    );
+}
+
+/// The archive `make dist` produces is exactly what `scripts/build.sh` downloads,
+/// checks and unpacks.
+#[test]
+fn an_archive_from_make_dist_installs_through_build_sh() {
+    if !make_available() {
+        return;
+    }
+    let Some(sb) = Sandbox::new("1.2.3", true) else {
+        return;
+    };
+    let (os, arch) = os_arch();
+    let triple = if os == "macos" {
+        format!("{arch}-apple-darwin")
+    } else {
+        format!("{arch}-unknown-linux-musl")
+    };
+    let packaging = sb.root.join("packaging");
+    let release_dir = packaging.join("target").join(&triple).join("release");
+    fs::create_dir_all(&release_dir).unwrap();
+    fs::copy(repo_root().join("Makefile"), packaging.join("Makefile")).unwrap();
+    fs::copy(
+        sb.repo.join("herdr-plugin.toml"),
+        packaging.join("herdr-plugin.toml"),
+    )
+    .unwrap();
+    for name in ["herdr-sleep", "herdr-sleep-ph"] {
+        write_executable(
+            &release_dir.join(name),
+            &format!("#!/bin/sh\necho packaged {name}\n"),
+        );
+    }
+    let made = make_dist(&packaging, &[&format!("TARGET={triple}"), "VERSION=1.2.3"]);
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+
+    let name = format!("herdr-sleep-1.2.3-{os}-{arch}.tar.gz");
+    let published = sb.releases.join("v1.2.3");
+    fs::create_dir_all(&published).unwrap();
+    for file in [name.clone(), format!("{name}.sha256")] {
+        fs::copy(packaging.join("dist").join(&file), published.join(&file)).unwrap();
+    }
+    let checksum = fs::read_to_string(published.join(format!("{name}.sha256"))).unwrap();
+    assert_eq!(
+        checksum,
+        format!("{}  {name}\n", sha256(&published.join(&name)).unwrap())
+    );
+
+    let (code, out, err) = sb.run();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("installed release 1.2.3"), "{out}");
+    assert_eq!(
+        sb.bin("herdr-sleep"),
+        "#!/bin/sh\necho packaged herdr-sleep\n"
+    );
+    assert_eq!(
+        sb.bin("herdr-sleep-ph"),
+        "#!/bin/sh\necho packaged herdr-sleep-ph\n"
+    );
+    assert_eq!(sb.cargo_calls(), "");
+}
