@@ -204,18 +204,34 @@ fn declares_shows_replays_and_hands_over() {
     ));
     assert!(h.screen.contains("session: sess-1"));
 
+    wait_for("the identity to be declared twice", || {
+        h.herdr_log().len() >= 7
+    });
     let log = h.herdr_log();
     let src = "--source pepsit36.herdr-sleep";
-    assert_eq!(log.len(), 4, "{log:?}");
-    assert!(log[0].starts_with(&format!("pane report-agent {src} --seq ")));
+    assert_eq!(log.len(), 7, "{log:?}");
+    assert!(log[0].starts_with(&format!("pane report-agent 1-2 {src} --seq ")));
     assert!(log[0].contains(
-        "--agent sleeping-claude --state idle --message sleeping --agent-session-id sess-1 1-2 -- "
+        "--agent sleeping-claude --state idle --message sleeping --agent-session-id sess-1 -- "
     ));
-    assert!(log[0].contains(env!("CARGO_BIN_EXE_herdr-sleep-ph")));
+    assert!(log[0].contains(" -- herdr-sleep-ph --pane "), "{}", log[0]);
     assert!(log[0].ends_with("-- claude --resume sess-1"), "{}", log[0]);
-    assert!(log[1].starts_with(&format!("pane report-agent-session {src} --seq ")));
+    assert!(log[1].starts_with(&format!("pane report-agent-session 1-2 {src} --seq ")));
     assert_eq!(log[2], "agent rename 1-2 worker");
-    assert!(log[3].ends_with("--token sleep=z 1-2"), "{}", log[3]);
+    assert!(
+        log[3].starts_with("pane report-metadata 1-2 --source"),
+        "{}",
+        log[3]
+    );
+    assert!(log[3].ends_with("--token sleep=z"), "{}", log[3]);
+    // The identity is declared once more after Herdr dropped the Agent's own.
+    assert!(log[4].starts_with("pane report-agent 1-2 "), "{}", log[4]);
+    assert!(
+        log[5].starts_with("pane report-agent-session 1-2 "),
+        "{}",
+        log[5]
+    );
+    assert_eq!(log[6], "agent rename 1-2 worker");
 
     #[cfg(target_os = "linux")]
     {
@@ -257,14 +273,15 @@ fn declares_shows_replays_and_hands_over() {
     );
 
     let log = h.herdr_log();
-    assert_eq!(log.len(), 6, "{log:?}");
-    assert!(log[4].ends_with("--clear-token sleep 1-2"), "{}", log[4]);
-    assert!(log[5].starts_with(&format!("pane release-agent {src} --seq ")));
+    assert_eq!(log.len(), 9, "{log:?}");
     assert!(
-        log[5].ends_with("--agent sleeping-claude 1-2"),
+        log[7].starts_with("pane report-metadata 1-2 --source"),
         "{}",
-        log[5]
+        log[7]
     );
+    assert!(log[7].ends_with("--clear-token sleep"), "{}", log[7]);
+    assert!(log[8].starts_with(&format!("pane release-agent 1-2 {src} --seq ")));
+    assert!(log[8].ends_with("--agent sleeping-claude"), "{}", log[8]);
     let seqs: Vec<u64> = [
         "pane report-agent ",
         "pane report-agent-session",
@@ -288,13 +305,16 @@ fn declares_shows_replays_and_hands_over() {
 }
 
 #[test]
-fn control_keys_wake_without_a_replay() {
+fn control_keys_wake_with_nothing_to_type() {
     let mut h = Harness::start("ctrl");
     h.expect_screen("is asleep");
     h.type_bytes(b"\x03\x03\x04");
     let shell = h.shell_record();
     assert_eq!(shell[1], "ARG=-i");
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(!h.path("state/replay-1-2.txt").exists());
-    assert!(!h.path("main.out").exists());
+    // The Replay still runs (it restores the name) but has nothing to type.
+    wait_for("the replay to start", || h.path("main.out").exists());
+    assert_eq!(
+        fs::read_to_string(h.path("state/replay-1-2.txt")).unwrap(),
+        ""
+    );
 }
