@@ -13,3 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 regex = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

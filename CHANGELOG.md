@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Installation:** install Herdr Sleep as a Herdr plugin with `herdr plugin install Pepsit36/herdr-sleep`. The install downloads the prebuilt binaries of the release (checksum verified) and falls back to building from source with cargo when none matches your platform or you are offline. The plugin adds the actions `sleep`, `wake`, `sweep`, `status` and `ensure-watcher`, starts its watcher with Herdr and wakes the focused pane on focus.
+
 ## [0.1.0] - 2026-11-08
 
 <!-- stamped -->
