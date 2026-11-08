@@ -85,6 +85,50 @@ fn parse_object(text: Option<String>) -> Option<Value> {
         .filter(Value::is_object)
 }
 
+/// The context Herdr gives a plugin command: `HERDR_PLUGIN_CONTEXT_JSON`
+/// (`pane_id`, `focused_pane_id`, `tab_id`, `workspace_id`, each optional)
+/// and the `HERDR_*` variables of the pane the command runs in.
+///
+/// The JSON is parsed defensively: fields are accepted at the top level and
+/// under a `data` object, empty strings count as absent and garbage is
+/// ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActionContext {
+    pub pane_id: Option<String>,
+    pub focused_pane_id: Option<String>,
+    pub tab_id: Option<String>,
+    pub workspace_id: Option<String>,
+    /// `HERDR_PANE_ID`: the pane the command was started from.
+    pub env_pane_id: Option<String>,
+}
+
+impl ActionContext {
+    /// Read the context from `lookup`, which answers environment variables.
+    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let get = |key: &str| lookup(key).filter(|v| !v.trim().is_empty());
+        let context: Vec<Value> = parse_object(get("HERDR_PLUGIN_CONTEXT_JSON"))
+            .into_iter()
+            .collect();
+        ActionContext {
+            pane_id: field(&context, "pane_id"),
+            focused_pane_id: field(&context, "focused_pane_id"),
+            tab_id: field(&context, "tab_id").or_else(|| get("HERDR_TAB_ID")),
+            workspace_id: field(&context, "workspace_id").or_else(|| get("HERDR_WORKSPACE_ID")),
+            env_pane_id: get("HERDR_PANE_ID"),
+        }
+    }
+
+    /// The pane an action without an explicit target is about: the pane of
+    /// the context, else the focused pane of the context, else the pane the
+    /// command runs in.
+    pub fn target(&self) -> Option<&str> {
+        self.pane_id
+            .as_deref()
+            .or(self.focused_pane_id.as_deref())
+            .or(self.env_pane_id.as_deref())
+    }
+}
+
 impl FocusEvent {
     /// Read the event from `lookup`, which answers environment variables.
     ///
@@ -95,9 +139,7 @@ impl FocusEvent {
         let payload: Vec<Value> = parse_object(get("HERDR_PLUGIN_EVENT_JSON"))
             .into_iter()
             .collect();
-        let context: Vec<Value> = parse_object(get("HERDR_PLUGIN_CONTEXT_JSON"))
-            .into_iter()
-            .collect();
+        let context = ActionContext::from_env(&lookup);
 
         let name = get("HERDR_PLUGIN_EVENT")
             .or_else(|| field(&payload, "event"))
@@ -109,12 +151,12 @@ impl FocusEvent {
             pane_id: field(&payload, "pane_id"),
             tab_id: field(&payload, "tab_id"),
             workspace_id: field(&payload, "workspace_id"),
-            context_pane_id: field(&context, "focused_pane_id")
-                .or_else(|| field(&context, "pane_id"))
-                .or_else(|| get("HERDR_PANE_ID")),
-            context_tab_id: field(&context, "tab_id").or_else(|| get("HERDR_TAB_ID")),
-            context_workspace_id: field(&context, "workspace_id")
-                .or_else(|| get("HERDR_WORKSPACE_ID")),
+            context_pane_id: context
+                .focused_pane_id
+                .or(context.pane_id)
+                .or(context.env_pane_id),
+            context_tab_id: context.tab_id,
+            context_workspace_id: context.workspace_id,
         }
     }
 
@@ -283,6 +325,51 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    #[test]
+    fn action_target_order_is_pane_then_focused_then_env() {
+        let all = [
+            (
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                r#"{"pane_id":"w1:p1","focused_pane_id":"w1:p2"}"#,
+            ),
+            ("HERDR_PANE_ID", "w1:p3"),
+        ];
+        assert_eq!(
+            ActionContext::from_env(lookup(&all)).target(),
+            Some("w1:p1")
+        );
+        let focused = [
+            (
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                r#"{"pane_id":"","focused_pane_id":"w1:p2"}"#,
+            ),
+            ("HERDR_PANE_ID", "w1:p3"),
+        ];
+        assert_eq!(
+            ActionContext::from_env(lookup(&focused)).target(),
+            Some("w1:p2")
+        );
+        let env_only = [
+            ("HERDR_PLUGIN_CONTEXT_JSON", "not json"),
+            ("HERDR_PANE_ID", "w1:p3"),
+        ];
+        assert_eq!(
+            ActionContext::from_env(lookup(&env_only)).target(),
+            Some("w1:p3")
+        );
+        assert_eq!(ActionContext::from_env(lookup(&[])).target(), None);
+    }
+
+    #[test]
+    fn action_context_accepts_a_data_object() {
+        let context = ActionContext::from_env(lookup(&[(
+            "HERDR_PLUGIN_CONTEXT_JSON",
+            r#"{"data":{"pane_id":"w2:p1","workspace_id":"w2"}}"#,
+        )]));
+        assert_eq!(context.target(), Some("w2:p1"));
+        assert_eq!(context.workspace_id.as_deref(), Some("w2"));
     }
 
     #[test]

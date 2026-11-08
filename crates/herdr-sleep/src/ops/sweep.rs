@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::guards::SleepMode;
+use crate::herdr::{Agent, Snapshot};
 use crate::journal::Journal;
 
 use super::{Env, SleepOutcome, sleep_agent, sync_markers};
@@ -98,6 +99,19 @@ impl SweepReport {
     }
 }
 
+/// Whether the agent has the focus, by its own flag or by the session focus.
+pub fn is_focused(snapshot: &Snapshot, agent: &Agent) -> bool {
+    agent.focused || snapshot.focused_pane_id.as_deref() == Some(agent.pane_id.as_str())
+}
+
+/// The signature an idle clock keeps: `status:state_change_seq:focused`.
+pub fn signature(agent: &Agent, focused: bool) -> String {
+    format!(
+        "{}:{}:{focused}",
+        agent.agent_status, agent.state_change_seq
+    )
+}
+
 /// Run one Sweep: update the idle clocks in `state` and put to sleep the
 /// agents that are due.
 pub fn sweep_once(env: &dyn Env, config: &Config, state: &mut SweepState) -> SweepReport {
@@ -129,12 +143,8 @@ pub fn sweep_with_mode(
             continue;
         }
         report.considered += 1;
-        let focused =
-            agent.focused || snapshot.focused_pane_id.as_deref() == Some(agent.pane_id.as_str());
-        let signature = format!(
-            "{}:{}:{focused}",
-            agent.agent_status, agent.state_change_seq
-        );
+        let focused = is_focused(&snapshot, agent);
+        let signature = signature(agent, focused);
         let clock = match state.agents.remove(&agent.pane_id) {
             Some(clock) if clock.signature == signature => clock,
             _ => AgentClock {

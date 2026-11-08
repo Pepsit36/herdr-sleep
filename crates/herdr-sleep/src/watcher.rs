@@ -96,6 +96,34 @@ pub fn recorded_pid(state_dir: &Path) -> Option<u32> {
         .ok()
 }
 
+/// Whether a Watcher runs, as `status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WatcherInfo {
+    pub running: bool,
+    /// The pid the Watcher wrote in its lock file, when it runs and wrote it.
+    pub pid: Option<u32>,
+}
+
+/// Look at the lock of the Watcher of `state_dir` without keeping it.
+///
+/// Fails when the state directory cannot be created or the lock cannot be
+/// opened.
+pub fn watcher_info(state_dir: &Path) -> std::io::Result<WatcherInfo> {
+    match WatcherLock::try_acquire(state_dir)? {
+        Some(lock) => {
+            drop(lock);
+            Ok(WatcherInfo {
+                running: false,
+                pid: None,
+            })
+        }
+        None => Ok(WatcherInfo {
+            running: true,
+            pid: recorded_pid(state_dir),
+        }),
+    }
+}
+
 /// What [`ensure_watcher`] found and did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ensure {
@@ -645,6 +673,35 @@ mod tests {
         // The pid is overwritten, not appended to.
         second.write_pid(7).unwrap();
         assert_eq!(fs::read_to_string(lock_path(&dir.0)).unwrap(), "7\n");
+    }
+
+    #[test]
+    fn watcher_info_tells_running_from_not_running() {
+        let dir = Dir(temp_dir("info"));
+        assert_eq!(
+            watcher_info(&dir.0).unwrap(),
+            WatcherInfo {
+                running: false,
+                pid: None
+            }
+        );
+        let mut lock = WatcherLock::try_acquire(&dir.0).unwrap().unwrap();
+        lock.write_pid(4242).unwrap();
+        assert_eq!(
+            watcher_info(&dir.0).unwrap(),
+            WatcherInfo {
+                running: true,
+                pid: Some(4242)
+            }
+        );
+    }
+
+    #[test]
+    fn watcher_info_fails_cleanly_on_an_unusable_state_dir() {
+        let dir = Dir(temp_dir("info-bad"));
+        let file = dir.0.join("plain-file");
+        fs::write(&file, "x").unwrap();
+        assert!(watcher_info(&file.join("state")).is_err());
     }
 
     // Loop ---------------------------------------------------------------

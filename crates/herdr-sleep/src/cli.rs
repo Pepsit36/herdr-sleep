@@ -1,6 +1,13 @@
-//! The `sleep`, `wake`, `event`, `sweep`, `watch`, `ensure-watcher` and
-//! `replay` commands.
+//! The commands: `sleep`, `wake`, `status`, `sweep`, `config`, `watch`,
+//! `ensure-watcher`, `event` and `replay`.
+//!
+//! Every failure prints `herdr-sleep: <message>` on stderr and exits 1; a
+//! usage error exits 2.
 
+mod config_cmd;
+mod status;
+
+use std::io::Write;
 use std::process::ExitCode;
 
 use herdr_sleep::config::Config;
@@ -8,29 +15,71 @@ use herdr_sleep::guards::SleepMode;
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, SweepReport, SweepState,
-    WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent, sweep_once, wake_agent,
+    ActionContext, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, SweepReport,
+    SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent, sweep_once,
+    wake_agent,
 };
 use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
 
-/// Run `herdr-sleep sleep <pane|name> [--force]`.
-pub fn sleep(target: &str, force: bool) -> ExitCode {
+pub use config_cmd::run as config;
+pub use status::run as status;
+
+/// Print `text` and a newline on stdout. A closed pipe (`| head`) is not an
+/// error worth a panic.
+pub fn emit(text: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.write_all(b"\n");
+}
+
+/// Print `herdr-sleep: <message>` on stderr and give the failure exit code.
+pub fn fail(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("herdr-sleep: {message}");
+    ExitCode::from(1)
+}
+
+/// Print a usage error and give the usage exit code.
+pub fn usage_error(message: &str) -> ExitCode {
+    eprintln!("herdr-sleep: {message}");
+    ExitCode::from(2)
+}
+
+/// The pane an action is about: the explicit `target`, else the one of the
+/// action context in `lookup`. `None` when neither gives one.
+pub fn resolve_target(
+    target: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match target {
+        Some(target) => Some(target.to_string()),
+        None => ActionContext::from_env(lookup).target().map(str::to_string),
+    }
+}
+
+fn target_or_usage(command: &str, target: Option<&str>) -> Result<String, ExitCode> {
+    resolve_target(target, |key| std::env::var(key).ok()).ok_or_else(|| {
+        usage_error(&format!(
+            "{command}: expects a pane or an agent name (none given and no Herdr action context)"
+        ))
+    })
+}
+
+/// Run `herdr-sleep sleep [<pane|name>] [--force] [--json]`.
+pub fn sleep(target: Option<&str>, force: bool, json: bool) -> ExitCode {
+    let target = match target_or_usage("sleep", target) {
+        Ok(target) => target,
+        Err(code) => return code,
+    };
     watcher::ensure_watcher_logged();
     let client = HerdrClient::from_env();
-    let agent = match client.agent_get(target) {
+    let agent = match client.agent_get(&target) {
         Ok(agent) => agent,
-        Err(error) => {
-            eprintln!("herdr-sleep: cannot find agent '{target}': {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return fail(format!("cannot find agent '{target}': {error}")),
     };
     let config = match Config::load() {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("herdr-sleep: {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return fail(error),
     };
     let mode = if force {
         SleepMode::Force
@@ -38,32 +87,39 @@ pub fn sleep(target: &str, force: bool) -> ExitCode {
         SleepMode::Manual
     };
     let outcome = sleep_agent(&LiveEnv::new(client), &config, &agent, mode, None);
-    let label = agent.name.as_deref().unwrap_or(&agent.pane_id);
-    println!("{}", describe(label, &outcome));
+    if json {
+        emit(&sleep_json(&agent, &outcome).to_string());
+    } else {
+        let label = agent.name.as_deref().unwrap_or(&agent.pane_id);
+        emit(&describe(label, &outcome));
+    }
     exit_code(&outcome)
 }
 
-/// Run `herdr-sleep wake <pane|name> [--no-wait] [--json]`.
-pub fn wake(target: &str, wait: bool, json: bool) -> ExitCode {
+/// Run `herdr-sleep wake [<pane|name>] [--no-wait] [--json]`.
+pub fn wake(target: Option<&str>, wait: bool, json: bool) -> ExitCode {
+    let target = match target_or_usage("wake", target) {
+        Ok(target) => target,
+        Err(code) => return code,
+    };
     watcher::ensure_watcher_logged();
     let client = HerdrClient::from_env();
-    let agent = client.agent_get(target).ok();
+    let agent = client.agent_get(&target).ok();
     let config = match Config::load() {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("herdr-sleep: {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return fail(error),
     };
-    let pane = agent.as_ref().map_or(target, |a| a.pane_id.as_str());
+    let pane = agent
+        .as_ref()
+        .map_or(target.as_str(), |a| a.pane_id.as_str());
     let outcome = wake_agent(&LiveEnv::new(client), &config, pane, WakeOptions { wait });
     if json {
-        println!("{}", wake_json(target, agent.as_ref(), &outcome));
+        emit(&wake_json(&target, agent.as_ref(), &outcome));
     } else {
         let label = agent
             .as_ref()
-            .map_or(target, |a| a.name.as_deref().unwrap_or(&a.pane_id));
-        println!("{}", describe_wake(label, &outcome, wait));
+            .map_or(target.as_str(), |a| a.name.as_deref().unwrap_or(&a.pane_id));
+        emit(&describe_wake(label, &outcome, wait));
     }
     wake_exit_code(&outcome)
 }
@@ -87,10 +143,7 @@ pub fn sweep(json: bool) -> ExitCode {
     watcher::ensure_watcher_logged();
     let config = match Config::load() {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("herdr-sleep: {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return fail(error),
     };
     let env = LiveEnv::new(HerdrClient::from_env());
     let mut state = herdr_sleep::ops::Env::state_dir(&env)
@@ -99,15 +152,12 @@ pub fn sweep(json: bool) -> ExitCode {
     let report = sweep_once(&env, &config, &mut state);
     if json {
         match serde_json::to_string(&report) {
-            Ok(text) => println!("{text}"),
-            Err(error) => {
-                eprintln!("herdr-sleep: cannot print the report: {error}");
-                return ExitCode::from(1);
-            }
+            Ok(text) => emit(&text),
+            Err(error) => return fail(format!("cannot print the report: {error}")),
         }
     } else {
         for line in describe_sweep(&report) {
-            println!("{line}");
+            emit(&line);
         }
     }
     if report.error.is_some() {
@@ -160,32 +210,45 @@ pub fn describe_sweep(report: &SweepReport) -> Vec<String> {
 /// Run `herdr-sleep watch [--detach]`.
 pub fn watch(detach: bool) -> ExitCode {
     if detach {
-        return ensure_watcher();
+        return ensure_watcher(false);
     }
     match watcher::watch() {
         WatchEnd::AlreadyRunning | WatchEnd::Exited(_) => ExitCode::SUCCESS,
-        WatchEnd::Failed(reason) => {
-            eprintln!("herdr-sleep: watcher: {reason}");
-            ExitCode::from(1)
-        }
+        WatchEnd::Failed(reason) => fail(format!("watcher: {reason}")),
     }
 }
 
-/// Run `herdr-sleep ensure-watcher`.
-pub fn ensure_watcher() -> ExitCode {
-    match watcher::ensure_watcher() {
+/// Run `herdr-sleep ensure-watcher [--json]`.
+pub fn ensure_watcher(json: bool) -> ExitCode {
+    let ensure = watcher::ensure_watcher();
+    if json {
+        emit(&ensure_json(&ensure).to_string());
+    }
+    match ensure {
         Ensure::AlreadyRunning => {
-            println!("watcher is already running");
+            if !json {
+                emit("watcher is already running");
+            }
             ExitCode::SUCCESS
         }
         Ensure::Started => {
-            println!("watcher started");
+            if !json {
+                emit("watcher started");
+            }
             ExitCode::SUCCESS
         }
-        Ensure::Failed(reason) => {
-            eprintln!("herdr-sleep: watcher: {reason}");
-            ExitCode::from(1)
-        }
+        Ensure::Failed(_) if json => ExitCode::from(1),
+        Ensure::Failed(reason) => fail(format!("watcher: {reason}")),
+    }
+}
+
+/// The `--json` object of `ensure-watcher`: `running`, `started` and `error`
+/// (`null` on success).
+pub fn ensure_json(ensure: &Ensure) -> serde_json::Value {
+    match ensure {
+        Ensure::AlreadyRunning => json!({"running": true, "started": false, "error": null}),
+        Ensure::Started => json!({"running": true, "started": true, "error": null}),
+        Ensure::Failed(reason) => json!({"running": false, "started": false, "error": reason}),
     }
 }
 
@@ -223,6 +286,27 @@ pub fn wake_json(target: &str, agent: Option<&Agent>, outcome: &WakeOutcome) -> 
     .to_string()
 }
 
+/// The `--json` object of a sleep: `pane`, `name`, `outcome` (`asleep`,
+/// `refused`, `dry-run`, `aborted` or `warned`), `slept`, `freed_kb` and
+/// `reason` (the refusal code or the explanation; `null` otherwise).
+pub fn sleep_json(agent: &Agent, outcome: &SleepOutcome) -> serde_json::Value {
+    let (code, freed_kb, reason) = match outcome {
+        SleepOutcome::Asleep { freed_kb } => ("asleep", Some(*freed_kb), None),
+        SleepOutcome::Skipped(refusal) => ("refused", None, Some(refusal.code().to_string())),
+        SleepOutcome::DryRun => ("dry-run", None, None),
+        SleepOutcome::Aborted(reason) => ("aborted", None, Some(reason.clone())),
+        SleepOutcome::Warned(reason) => ("warned", None, Some(reason.clone())),
+    };
+    json!({
+        "pane": agent.pane_id,
+        "name": agent.name,
+        "outcome": code,
+        "slept": matches!(outcome, SleepOutcome::Asleep { .. }),
+        "freed_kb": freed_kb,
+        "reason": reason,
+    })
+}
+
 /// 0 woken, not asleep or de-duplicated, 1 not found or failed, 2 timed out.
 pub fn wake_exit_code(outcome: &WakeOutcome) -> ExitCode {
     match outcome {
@@ -239,19 +323,13 @@ pub fn wake_exit_code(outcome: &WakeOutcome) -> ExitCode {
 pub fn replay_command(args: &ReplayArgs) -> ExitCode {
     let config = match Config::load() {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("herdr-sleep: {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return fail(error),
     };
     let env = LiveEnv::new(HerdrClient::from_env());
     match replay(&env, &config, args) {
         ReplayOutcome::Replayed { .. } => ExitCode::SUCCESS,
         ReplayOutcome::TimedOut => ExitCode::from(1),
-        ReplayOutcome::Failed(reason) => {
-            eprintln!("herdr-sleep: replay failed: {reason}");
-            ExitCode::from(1)
-        }
+        ReplayOutcome::Failed(reason) => fail(format!("replay failed: {reason}")),
     }
 }
 
@@ -393,6 +471,113 @@ mod tests {
         assert_eq!(
             parse(wake_json("nope", None, &WakeOutcome::NotFound)),
             json!({"woke": false, "pane": "nope", "name": null, "ms": null, "reason": "not-found"})
+        );
+    }
+
+    fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn an_explicit_target_wins_over_the_context() {
+        let env = [("HERDR_PANE_ID", "w1:p9")];
+        assert_eq!(
+            resolve_target(Some("worker"), lookup(&env)).as_deref(),
+            Some("worker")
+        );
+    }
+
+    #[test]
+    fn the_context_fallback_order() {
+        let json = r#"{"pane_id":"w1:p1","focused_pane_id":"w1:p2"}"#;
+        let all = [
+            ("HERDR_PLUGIN_CONTEXT_JSON", json),
+            ("HERDR_PANE_ID", "w1:p3"),
+        ];
+        assert_eq!(resolve_target(None, lookup(&all)).as_deref(), Some("w1:p1"));
+        let focused = [
+            (
+                "HERDR_PLUGIN_CONTEXT_JSON",
+                r#"{"focused_pane_id":"w1:p2"}"#,
+            ),
+            ("HERDR_PANE_ID", "w1:p3"),
+        ];
+        assert_eq!(
+            resolve_target(None, lookup(&focused)).as_deref(),
+            Some("w1:p2")
+        );
+        let env_only = [("HERDR_PANE_ID", "w1:p3")];
+        assert_eq!(
+            resolve_target(None, lookup(&env_only)).as_deref(),
+            Some("w1:p3")
+        );
+        assert_eq!(resolve_target(None, lookup(&[])), None);
+    }
+
+    #[test]
+    fn sleep_json_shape() {
+        let agent = Agent {
+            pane_id: "w1:p2".into(),
+            name: Some("worker".into()),
+            ..Agent::default()
+        };
+        assert_eq!(
+            sleep_json(&agent, &SleepOutcome::Asleep { freed_kb: 2048 }),
+            json!({"pane": "w1:p2", "name": "worker", "outcome": "asleep", "slept": true,
+                   "freed_kb": 2048, "reason": null})
+        );
+        assert_eq!(
+            sleep_json(&agent, &SleepOutcome::Skipped(Refusal::Focused)),
+            json!({"pane": "w1:p2", "name": "worker", "outcome": "refused", "slept": false,
+                   "freed_kb": null, "reason": "focused"})
+        );
+        assert_eq!(
+            sleep_json(&agent, &SleepOutcome::DryRun)["outcome"],
+            "dry-run"
+        );
+        assert_eq!(
+            sleep_json(&agent, &SleepOutcome::Aborted("x".into()))["reason"],
+            "x"
+        );
+    }
+
+    #[test]
+    fn ensure_json_shape() {
+        assert_eq!(
+            ensure_json(&Ensure::AlreadyRunning),
+            json!({"running": true, "started": false, "error": null})
+        );
+        assert_eq!(
+            ensure_json(&Ensure::Started),
+            json!({"running": true, "started": true, "error": null})
+        );
+        assert_eq!(
+            ensure_json(&Ensure::Failed("no".into())),
+            json!({"running": false, "started": false, "error": "no"})
+        );
+    }
+
+    #[test]
+    fn sweep_json_keys() {
+        let value = serde_json::to_value(SweepReport::default()).unwrap();
+        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "aborted",
+                "considered",
+                "deferred",
+                "dry_run",
+                "error",
+                "refused",
+                "slept"
+            ]
         );
     }
 }
