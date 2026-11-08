@@ -160,6 +160,25 @@ esac
 
     /// Pids of the Watchers running against this state directory.
     #[cfg(target_os = "linux")]
+    /// A watcher that lost the lock election needs a few milliseconds to
+    /// exit, so wait for the process list to settle before judging it.
+    #[cfg(target_os = "linux")]
+    fn assert_only_watcher(&self, expected: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let pids = self.watcher_pids();
+            if pids == [expected] {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected only watcher {expected}, found {pids:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn watcher_pids(&self) -> Vec<u32> {
         let needle = format!("HERDR_SLEEP_STATE_DIR={}", self.state().display());
         let mut pids = Vec::new();
@@ -226,7 +245,7 @@ fn two_detached_starts_leave_one_watcher_and_a_killed_one_is_replaced() {
     let first = sandbox.wait_for_watcher();
     std::thread::sleep(Duration::from_millis(500));
     #[cfg(target_os = "linux")]
-    assert_eq!(sandbox.watcher_pids(), [first]);
+    sandbox.assert_only_watcher(first);
     assert!(sandbox.journal().contains("WATCH-START"));
 
     let output = sandbox.run(&["ensure-watcher"]);
@@ -247,7 +266,7 @@ fn two_detached_starts_leave_one_watcher_and_a_killed_one_is_replaced() {
             .filter(|pid| *pid != first)
     });
     #[cfg(target_os = "linux")]
-    assert_eq!(sandbox.watcher_pids(), [second]);
+    sandbox.assert_only_watcher(second);
     assert_ne!(first, second);
 }
 
