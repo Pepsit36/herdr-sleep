@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use herdr_sleep::ops::ReplayArgs;
 
 /// Every command name, internal ones included.
-pub const COMMANDS: [&str; 9] = [
+pub const COMMANDS: [&str; 10] = [
     "watch",
     "sweep",
     "sleep",
@@ -21,6 +21,7 @@ pub const COMMANDS: [&str; 9] = [
     "event",
     "replay",
     "ensure-watcher",
+    "restore",
 ];
 
 /// What the command line asks for.
@@ -53,6 +54,9 @@ pub enum Invocation {
         detach: bool,
     },
     EnsureWatcher {
+        json: bool,
+    },
+    Restore {
         json: bool,
     },
     /// The focus hooks.
@@ -193,6 +197,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         }),
         "ensure-watcher" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
             Invocation::EnsureWatcher {
+                json: p.has("--json"),
+            }
+        }),
+        "restore" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
+            Invocation::Restore {
                 json: p.has("--json"),
             }
         }),
@@ -450,6 +459,23 @@ mod tests {
                 format!("{command}: unknown option '--detach'")
             );
         }
+    }
+
+    #[test]
+    fn restore_options() {
+        assert_eq!(parse(&["restore"]), Invocation::Restore { json: false });
+        assert_eq!(
+            parse(&["restore", "--json"]),
+            Invocation::Restore { json: true }
+        );
+        assert_eq!(
+            usage(&["restore", "x"]),
+            "restore: takes no argument, got 'x'"
+        );
+        assert_eq!(
+            usage(&["restore", "--force"]),
+            "restore: unknown option '--force'"
+        );
     }
 
     #[test]

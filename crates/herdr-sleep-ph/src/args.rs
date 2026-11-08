@@ -1,7 +1,7 @@
 //! Command line of the Placeholder.
 //!
-//! Named flags keep the process self-describing in `ps` and in the resume
-//! command Herdr stores, and make the order irrelevant. Everything after `--`
+//! Named flags keep the process self-describing in `ps` and make the order
+//! irrelevant. Everything after `--`
 //! is the agent's resume command.
 
 pub const USAGE: &str = "\

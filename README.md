@@ -47,9 +47,12 @@ Update with `herdr plugin update`.
    with `herdr agent prompt`, or running `herdr-sleep wake` starts the agent again with its
    `--resume`. The pane name comes back, and what you typed meanwhile is typed into the agent when
    it shows its prompt.
-4. **After a Herdr restart,** the plugin restores sleeping panes as placeholders at startup instead
-   of letting Herdr relaunch every agent at once. Set `resume_agents_on_restore = false` in the
-   `[session]` section of Herdr's config so that Herdr does not also relaunch them.
+4. **After a Herdr restart,** the plugin restores sleeping panes as placeholders at startup, without
+   starting any agent, instead of letting Herdr relaunch them all at once. Set
+   `resume_agents_on_restore = false` in the `[session]` section of Herdr's config so that Herdr does
+   not also relaunch them. Only panes that still exist, have no agent and sit at a shell prompt are
+   restored (Herdr starts a restored pane's shell when a client attaches, so the plugin waits up to
+   20 seconds per pane); the others are left alone and logged as `RESTORE-SKIP` in the journal.
 
 ## Sidebar marker
 
@@ -154,7 +157,9 @@ is replayed into the agent once it is ready.
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
 - **See what would happen** with `dry_run = true`.
 - Sleeping panes after a Herdr restart appear once a Herdr client attaches; panes the plugin could
-  not restore are listed as `RESTORE-SKIP` in the journal.
+  not restore are listed as `RESTORE-SKIP <pane> <reason>` in the journal, followed by a
+  `RESTORE-DONE restored=N skipped=M` line. The panes it knows about are in `sleepers.json` in the
+  state directory.
 
 ## What is verified
 

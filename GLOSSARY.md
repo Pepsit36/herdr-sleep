@@ -49,7 +49,7 @@ The tiny process that occupies a sleeping pane: it announces the Sleeping agent 
 _Avoid_: Stub, sleeper, daemon
 
 **Sleeping agent**:
-The identity a Placeholder reports to Herdr: Kind prefixed with `sleeping-`, the original name, status `idle`, and the Placeholder's own command as resume command.
+The identity a Placeholder reports to Herdr: Kind prefixed with `sleeping-`, the original name, and status `idle`.
 _Avoid_: Ghost, parked agent
 
 **Preview**:
@@ -59,6 +59,10 @@ _Avoid_: Snapshot, screenshot
 **Wake**:
 Launching the Agent again with its Session, in place of the Placeholder, through the user's shell.
 _Avoid_: Resume (reserved for the agent-side command), restore, unpark
+
+**Restore**:
+Putting the Placeholder back, after a Herdr restart, in every pane that was asleep before it, without starting any Agent.
+_Avoid_: Resume (reserved for the agent-side command), relaunch
 
 **Wake trigger**:
 Any event that causes a Wake: the pane receiving focus, any key pressed in the Placeholder, a prompt sent to the pane, or an explicit `wake` command.

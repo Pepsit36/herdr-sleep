@@ -57,9 +57,15 @@ fn manifest_build_and_startup_commands() {
     assert_eq!(build.len(), 1);
     assert_eq!(strings(&build[0]["command"]), ["sh", "scripts/build.sh"]);
     let startup = tables(&m, "startup");
-    assert_eq!(startup.len(), 1);
+    // Herdr starts the hooks asynchronously: `restore` also starts the watcher
+    // when it ends, and `watch --detach` is idempotent.
+    assert_eq!(startup.len(), 2);
     assert_eq!(
         strings(&startup[0]["command"]),
+        ["bin/herdr-sleep", "restore"]
+    );
+    assert_eq!(
+        strings(&startup[1]["command"]),
         ["bin/herdr-sleep", "watch", "--detach"]
     );
 }

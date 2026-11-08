@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::journal::Journal;
 
 use super::Env;
-use super::wake::{READY_TIMEOUT, await_ready, restore_name};
+use super::wake::{READY_TIMEOUT, await_ready, forget, restore_name};
 
 /// Pause between typing the text and pressing Enter, so a menu opened by the
 /// text can settle.
@@ -72,6 +72,7 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
         return ReplayOutcome::TimedOut;
     }
     restore_name(env, &journal, pane, args.name.as_deref());
+    forget(&journal, &state_dir, pane);
 
     if let Err(error) = std::fs::remove_file(&args.file) {
         journal.log(
@@ -138,6 +139,22 @@ mod tests {
         assert_eq!(fake.clock(), Duration::from_millis(3300));
         assert_eq!(fake.events(), ["REPLAY"]);
         assert!(fake.journal().trim_end().ends_with("REPLAY w1:p2 bytes=13"));
+    }
+
+    #[test]
+    fn a_ready_agent_leaves_the_registry() {
+        use crate::ops::registry::{Registry, Sleeper};
+        let (fake, args) = setup("registry", "hi");
+        let sleeper = Sleeper {
+            kind: "claude".into(),
+            session: "s".into(),
+            name: None,
+            cwd: "/".into(),
+            since_ms: 1,
+        };
+        Registry::add(&fake.state_dir, "w1:p2", sleeper).unwrap();
+        replay(&fake, &Config::default(), &args);
+        assert!(Registry::load(&fake.state_dir).panes.is_empty());
     }
 
     #[test]

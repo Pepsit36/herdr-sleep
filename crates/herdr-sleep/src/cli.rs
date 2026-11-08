@@ -1,5 +1,5 @@
 //! The commands: `sleep`, `wake`, `status`, `sweep`, `config`, `watch`,
-//! `ensure-watcher`, `event` and `replay`.
+//! `ensure-watcher`, `restore`, `event` and `replay`.
 //!
 //! Every failure prints `herdr-sleep: <message>` on stderr and exits 1; a
 //! usage error exits 2.
@@ -15,9 +15,9 @@ use herdr_sleep::guards::SleepMode;
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    ActionContext, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, SleepOutcome, SweepReport,
-    SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent, sweep_once,
-    wake_agent,
+    ActionContext, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, RestoreReport, SleepOutcome,
+    SweepReport, SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent,
+    sweep_once, wake_agent,
 };
 use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
@@ -136,6 +136,54 @@ pub fn event() -> ExitCode {
     let env = LiveEnv::new(HerdrClient::from_env());
     handle_focus_event(&env, &config, &event);
     ExitCode::SUCCESS
+}
+
+/// Run `herdr-sleep restore [--json]`, the command of the startup hook: put
+/// the Placeholder back in the panes that slept before a Herdr restart, then
+/// make sure the Watcher runs. Always successful: a hook must never fail
+/// loudly, the journal holds the outcome.
+pub fn restore(json: bool) -> ExitCode {
+    let config = Config::load().unwrap_or_else(|error| {
+        eprintln!("herdr-sleep: {error}");
+        Config::default()
+    });
+    let env = LiveEnv::new(HerdrClient::from_env());
+    let report = herdr_sleep::ops::restore(&env, &config);
+    watcher::ensure_watcher_logged();
+    if json {
+        match serde_json::to_string(&report) {
+            Ok(text) => emit(&text),
+            Err(error) => eprintln!("herdr-sleep: cannot print the report: {error}"),
+        }
+    } else {
+        for line in describe_restore(&report) {
+            emit(&line);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// One line per restored or skipped pane, or a single line when there was
+/// nothing to do.
+pub fn describe_restore(report: &RestoreReport) -> Vec<String> {
+    if let Some(error) = &report.error {
+        return vec![format!("restore failed: {error}")];
+    }
+    let mut lines: Vec<String> = report
+        .restored
+        .iter()
+        .map(|pane| format!("{pane} is asleep again"))
+        .collect();
+    lines.extend(
+        report
+            .skipped
+            .iter()
+            .map(|(pane, reason)| format!("{pane} left alone: {reason}")),
+    );
+    if lines.is_empty() {
+        lines.push("no sleeping pane to restore".to_string());
+    }
+    lines
 }
 
 /// Run `herdr-sleep sweep [--json]`: one Sweep in the foreground.
@@ -424,6 +472,28 @@ mod tests {
         assert_eq!(wake_exit_code(&WakeOutcome::NotSleeping), ExitCode::SUCCESS);
         assert_eq!(wake_exit_code(&WakeOutcome::NotFound), ExitCode::from(1));
         assert_eq!(wake_exit_code(&WakeOutcome::TimedOut), ExitCode::from(2));
+    }
+
+    #[test]
+    fn restore_lines() {
+        let report = RestoreReport {
+            restored: vec!["p1".into()],
+            skipped: vec![("p2".into(), "pane-busy".into())],
+            error: None,
+        };
+        assert_eq!(
+            describe_restore(&report),
+            ["p1 is asleep again", "p2 left alone: pane-busy"]
+        );
+        assert_eq!(
+            describe_restore(&RestoreReport::default()),
+            ["no sleeping pane to restore"]
+        );
+        let failed = RestoreReport {
+            error: Some("socket gone".into()),
+            ..RestoreReport::default()
+        };
+        assert_eq!(describe_restore(&failed), ["restore failed: socket gone"]);
     }
 
     #[test]

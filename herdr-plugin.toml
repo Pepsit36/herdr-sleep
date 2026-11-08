@@ -11,6 +11,9 @@ platforms = ["linux", "macos"]
 command = ["sh", "scripts/build.sh"]
 
 [[startup]]
+command = ["bin/herdr-sleep", "restore"]
+
+[[startup]]
 command = ["bin/herdr-sleep", "watch", "--detach"]
 
 [[events]]
