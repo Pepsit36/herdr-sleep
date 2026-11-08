@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Commands:** `herdr-sleep status` lists every managed agent with its idle time, memory and last refusal, and the watcher state; `herdr-sleep config` prints the effective configuration; `status`, `sweep`, `sleep`, `wake`, `config` and `ensure-watcher` accept `--json`, and `sleep` and `wake` act on the pane of the Herdr action when no target is given.
+
 ## [0.1.0] - 2026-11-08
 
 <!-- stamped -->
