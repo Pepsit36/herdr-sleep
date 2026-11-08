@@ -169,8 +169,11 @@ release:prepare:
     PIP_BREAK_SYSTEM_PACKAGES: "1"
     ZIGLANG_VERSION: "0.13.0"
     CARGO_ZIGBUILD_VERSION: "0.24.1"
+  # Per branch, so a build from a feature branch (canary) can never fill a cache
+  # that the release build on main restores. Cargo also checks every crate
+  # against the checksums in Cargo.lock.
   cache:
-    key: cross-$TARGET
+    key: cross-$CI_COMMIT_REF_SLUG-$TARGET
     paths:
       - .cargo-home/registry/
   parallel:
@@ -187,6 +190,8 @@ release:prepare:
     - rustc --version && cargo --version
 
 build:release:
+  # What ships to users is built without any restored cache.
+  cache: []
   extends: [.cross, .release-main]
   stage: build
   needs:
