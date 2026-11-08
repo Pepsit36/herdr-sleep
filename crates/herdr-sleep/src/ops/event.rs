@@ -20,6 +20,7 @@ use crate::herdr::Snapshot;
 use crate::journal::Journal;
 
 use super::Env;
+use super::markers::sync_markers;
 use super::sleep::wait_until;
 use super::wake::{WakeOptions, WakeOutcome, wake_agent};
 
@@ -253,6 +254,7 @@ pub fn handle_focus_event(env: &dyn Env, config: &Config, event: &FocusEvent) ->
             AWAKE_TIMEOUT.as_secs()
         ));
     }
+    sync_markers(env, config);
     EventOutcome::Woke { pane }
 }
 
@@ -586,6 +588,18 @@ mod tests {
             unreachable!()
         }
 
+        fn tab_rename(&self, _: &str, _: &str) -> EnvResult<()> {
+            Ok(())
+        }
+        fn workspace_report_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &crate::herdr::MetadataChange,
+            _: u64,
+        ) -> EnvResult<()> {
+            Ok(())
+        }
         fn check_guards(&self, _: &Config, _: &Agent, _: SleepMode) -> Result<(), Refusal> {
             unreachable!()
         }

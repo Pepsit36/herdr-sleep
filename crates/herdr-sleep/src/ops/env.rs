@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{self, Config};
 use crate::guards::{self, Refusal, SleepMode};
-use crate::herdr::{Agent, HerdrClient, Pane, ProcessInfo, ReadFormat, Snapshot};
+use crate::herdr::{Agent, HerdrClient, MetadataChange, Pane, ProcessInfo, ReadFormat, Snapshot};
 use crate::procs::{self, ProcessTable};
 
 /// File name of the Placeholder binary, installed next to `herdr-sleep`.
@@ -40,6 +40,16 @@ pub trait Env {
     fn run(&self, pane: &str, argv: &[&str]) -> EnvResult<()>;
     /// Show a notification in Herdr.
     fn notify(&self, title: &str, body: &str) -> EnvResult<()>;
+    /// Give the tab `tab` the label `label`.
+    fn tab_rename(&self, tab: &str, label: &str) -> EnvResult<()>;
+    /// Set or clear a metadata token of `workspace` on behalf of `source`.
+    fn workspace_report_metadata(
+        &self,
+        workspace: &str,
+        source: &str,
+        change: &MetadataChange,
+        seq: u64,
+    ) -> EnvResult<()>;
 
     /// Run the guards for `agent`.
     fn check_guards(&self, config: &Config, agent: &Agent, mode: SleepMode) -> Result<(), Refusal>;
@@ -158,6 +168,22 @@ impl Env for LiveEnv {
 
     fn notify(&self, title: &str, body: &str) -> EnvResult<()> {
         self.client.notify(title, body).map_err(message)
+    }
+
+    fn tab_rename(&self, tab: &str, label: &str) -> EnvResult<()> {
+        self.client.tab_rename(tab, label).map_err(message)
+    }
+
+    fn workspace_report_metadata(
+        &self,
+        workspace: &str,
+        source: &str,
+        change: &MetadataChange,
+        seq: u64,
+    ) -> EnvResult<()> {
+        self.client
+            .workspace_report_metadata(workspace, source, change, seq)
+            .map_err(message)
     }
 
     fn check_guards(&self, config: &Config, agent: &Agent, mode: SleepMode) -> Result<(), Refusal> {

@@ -17,6 +17,7 @@ use crate::guards;
 use crate::journal::Journal;
 
 use super::Env;
+use super::markers::sync_markers;
 use super::sleep::wait_until;
 
 /// Wakes of one pane closer together than this are one Wake.
@@ -103,6 +104,7 @@ pub fn wake_agent(
             restore_name(env, &journal, pane, agent.name.as_deref());
             let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             journal.log("READY", &format!("{label} ({pane}) {ms}"));
+            sync_markers(env, config);
             WakeOutcome::Woken { ms }
         }
         None => {
@@ -300,7 +302,7 @@ pub(super) mod tests {
 
     impl Env for Fake {
         fn snapshot(&self) -> EnvResult<crate::herdr::Snapshot> {
-            unreachable!()
+            Ok(crate::herdr::Snapshot::default())
         }
 
         fn pane(&self, _: &str) -> EnvResult<Pane> {
@@ -369,6 +371,18 @@ pub(super) mod tests {
             unreachable!()
         }
 
+        fn tab_rename(&self, _: &str, _: &str) -> EnvResult<()> {
+            Ok(())
+        }
+        fn workspace_report_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &crate::herdr::MetadataChange,
+            _: u64,
+        ) -> EnvResult<()> {
+            Ok(())
+        }
         fn check_guards(&self, _: &Config, _: &Agent, _: SleepMode) -> Result<(), Refusal> {
             unreachable!()
         }

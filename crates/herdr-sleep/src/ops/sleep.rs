@@ -22,6 +22,7 @@ use crate::herdr::Agent;
 use crate::journal::Journal;
 
 use super::Env;
+use super::markers::sync_markers;
 
 /// Pause between typing the exit command and pressing Enter, so an
 /// autocomplete menu opened by the command can settle.
@@ -250,6 +251,7 @@ pub fn sleep_agent(
     if !announced {
         let reason = format!("placeholder did not report sleeping-{kind}");
         journal.log("WARN", &format!("{label} ({pane}): {reason}"));
+        sync_markers(env, config);
         return SleepOutcome::Warned(reason);
     }
     let freed_mb = freed_kb / 1024;
@@ -263,6 +265,7 @@ pub fn sleep_agent(
             &notification_text(&config.sleep_icon, label, kind, freed_mb),
         );
     }
+    sync_markers(env, config);
     SleepOutcome::Asleep { freed_kb }
 }
 
@@ -525,7 +528,7 @@ mod tests {
 
     impl Env for Fake {
         fn snapshot(&self) -> EnvResult<crate::herdr::Snapshot> {
-            unreachable!()
+            Ok(crate::herdr::Snapshot::default())
         }
 
         fn pane(&self, pane: &str) -> EnvResult<Pane> {
@@ -600,6 +603,18 @@ mod tests {
             Ok(())
         }
 
+        fn tab_rename(&self, _: &str, _: &str) -> EnvResult<()> {
+            Ok(())
+        }
+        fn workspace_report_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &crate::herdr::MetadataChange,
+            _: u64,
+        ) -> EnvResult<()> {
+            Ok(())
+        }
         fn check_guards(&self, _: &Config, _: &Agent, mode: SleepMode) -> Result<(), Refusal> {
             self.log(format!("guards {mode:?}"));
             self.guards.clone()
