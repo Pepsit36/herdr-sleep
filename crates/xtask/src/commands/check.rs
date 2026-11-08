@@ -75,7 +75,10 @@ pub fn run(args: &[String]) -> Outcome {
     }
 
     let Some(level) = level else {
-        if let Some(stamped) = stamped {
+        // A stamped section the merge base already carries was inherited, not
+        // written by this branch (before the first tag the release has not
+        // happened yet). Only a stamp the branch wrote itself is superfluous.
+        if let Some(stamped) = stamped.filter(|s| diff.base_body(s.version).is_none()) {
             return Ok(superfluous_stamp(stamped));
         }
         println!(

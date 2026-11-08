@@ -557,6 +557,26 @@ fn check_passes_a_quiet_branch_that_touched_nothing() {
 }
 
 #[test]
+fn check_passes_a_quiet_branch_when_main_carries_the_stamp_before_the_first_tag() {
+    // Before the first release `main` holds a stamped 0.1.0 that has no tag yet.
+    // A branch that publishes nothing and leaves it alone has nothing to answer for.
+    let repo = Repo::new();
+    repo.commit("feat: first");
+    repo.commit_changelog(
+        &format!(
+            "## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n\n{MARKER}\n\n### Added\n\n- First.\n"
+        ),
+        "docs(changelog): stamp 0.1.0",
+    );
+    repo.push_main();
+    repo.branch("docs/readme");
+    repo.commit("docs: explain");
+    let run = repo.xtask(&["changelog", "check", "--base", "origin/main"]);
+    assert_eq!(run.code, 0, "{}", run.err);
+    assert!(run.out.contains("nothing to require"), "{}", run.out);
+}
+
+#[test]
 fn check_refuses_a_change_to_a_tagged_section() {
     let repo = Repo::new().with_first_release();
     repo.branch("feature/typo");
