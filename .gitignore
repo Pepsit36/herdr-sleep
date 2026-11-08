@@ -3,3 +3,4 @@
 /.cargo-home/
 *.log
 .DS_Store
+/bin/
