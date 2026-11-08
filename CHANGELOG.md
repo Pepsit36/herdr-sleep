@@ -14,13 +14,7 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
-### Added
-
-- **Automatic sleep:** idle agents are put to sleep after `sleep_after_minutes`, by a background
-  watcher that starts with Herdr and restarts itself when it is missing; `herdr-sleep sweep` runs
-  one pass on demand.
-
-## [0.1.0] - 2026-11-07
+## [0.1.0] - 2026-11-08
 
 <!-- stamped -->
 
@@ -35,3 +29,6 @@ a published entry is frozen, typo included.
 - **Wake:** `herdr-sleep wake <pane|name>` wakes a sleeping agent: any focus, key or prompt wakes a
   sleeping pane, and what was typed meanwhile is replayed into the agent once it is ready.
 - **Focus wake:** focusing a sleeping pane, or its tab or space, wakes that pane only.
+- **Automatic sleep:** idle agents are put to sleep after `sleep_after_minutes`, by a background
+  watcher that starts with Herdr and restarts itself when it is missing; `herdr-sleep sweep` runs
+  one pass on demand.
