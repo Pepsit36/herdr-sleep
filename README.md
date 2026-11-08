@@ -152,7 +152,9 @@ is replayed into the agent once it is ready.
 - **An agent never sleeps.** `herdr-sleep status` shows the last refusal per agent: `draft-in-prompt`
   (text typed at the prompt), `busy-children` (a child process is running; add it to
   `ignore_child_regex` if it is harmless), `prompt-not-detected` (the screen shows no prompt that
-  matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess), and so on.
+  matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess),
+  `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
+  first message: it could not be resumed, so the agent is left alone and retried later), and so on.
 - **Nothing happens at all.** Run `herdr-sleep ensure-watcher`, then check the journal,
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
 - **See what would happen** with `dry_run = true`.

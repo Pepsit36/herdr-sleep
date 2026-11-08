@@ -6,7 +6,10 @@
 //! fail closed (see ADR 0003): when the prompt cannot be recognised, the agent
 //! is not put to sleep.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
@@ -44,6 +47,7 @@ pub enum SleepMode {
 pub enum Refusal {
     NotManaged,
     NoSession,
+    NoConversation,
     NotSettled(AgentStatus),
     Focused,
     NotIncluded,
@@ -62,6 +66,7 @@ impl Refusal {
         match self {
             Refusal::NotManaged => "not-managed",
             Refusal::NoSession => "no-session",
+            Refusal::NoConversation => "no-conversation",
             Refusal::NotSettled(_) => "not-settled",
             Refusal::Focused => "focused",
             Refusal::NotIncluded => "not-included",
@@ -87,6 +92,7 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::NotManaged => f.write_str("agent kind is not managed"),
             Refusal::NoSession => f.write_str("no session id"),
+            Refusal::NoConversation => f.write_str("no saved conversation to resume yet"),
             Refusal::NotSettled(status) => write!(f, "agent is {status}, not settled"),
             Refusal::Focused => f.write_str("agent is focused"),
             Refusal::NotIncluded => f.write_str("name is not in include_names"),
@@ -121,6 +127,35 @@ pub trait Probe {
     fn environment(&self, pid: i32) -> Option<Vec<(String, String)>>;
     /// The pane's screen as ANSI text, `None` when it cannot be read.
     fn screen(&self) -> Option<String>;
+    /// Whether Claude Code has saved the conversation of `session_id`,
+    /// `None` when that cannot be told.
+    fn claude_conversation_saved(&self, session_id: &str) -> Option<bool>;
+}
+
+/// Claude Code's configuration directory: `$CLAUDE_CONFIG_DIR`, else
+/// `~/.claude`.
+fn claude_config_dir(config_dir: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => home
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join(".claude")),
+    }
+}
+
+/// Whether `<config_dir>/projects/*/<session_id>.jsonl` exists. Claude Code
+/// writes that transcript with the first message; without it `--resume` fails.
+fn claude_transcript_exists(config_dir: &Path, session_id: &str) -> Option<bool> {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id == ".." {
+        return Some(false);
+    }
+    let file = format!("{session_id}.jsonl");
+    let projects = fs::read_dir(config_dir.join("projects")).ok()?;
+    Some(
+        projects
+            .flatten()
+            .any(|project| project.path().join(&file).is_file()),
+    )
 }
 
 /// [`Probe`] backed by the real Herdr and the real processes.
@@ -148,6 +183,14 @@ impl Probe for LiveProbe<'_> {
         self.client
             .pane_read(self.pane, SCREEN_LINES, ReadFormat::Ansi)
             .ok()
+    }
+
+    fn claude_conversation_saved(&self, session_id: &str) -> Option<bool> {
+        let dir = claude_config_dir(
+            std::env::var_os("CLAUDE_CONFIG_DIR"),
+            std::env::var_os("HOME"),
+        )?;
+        claude_transcript_exists(&dir, session_id)
     }
 }
 
@@ -199,8 +242,12 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         return Ok(());
     }
 
-    if agent.session_id().is_none() {
-        return Err(Refusal::NoSession);
+    let session_id = agent.session_id().ok_or(Refusal::NoSession)?;
+    // Only Claude Code has a reliable check; a missing answer fails closed.
+    if agent.kind() == Some("claude")
+        && ctx.probe.claude_conversation_saved(session_id) != Some(true)
+    {
+        return Err(Refusal::NoConversation);
     }
     if !config.allows_status(agent.agent_status) {
         return Err(Refusal::NotSettled(agent.agent_status));
@@ -563,9 +610,13 @@ mod tests {
         info: Option<ProcessInfo>,
         env: HashMap<i32, Vec<(String, String)>>,
         screen: Option<String>,
+        saved: Option<bool>,
     }
 
     impl Probe for FakeProbe {
+        fn claude_conversation_saved(&self, _session_id: &str) -> Option<bool> {
+            self.saved
+        }
         fn process_info(&self) -> Option<ProcessInfo> {
             self.info.clone()
         }
@@ -593,6 +644,7 @@ mod tests {
             }),
             env: HashMap::new(),
             screen: Some(esc(screen)),
+            saved: Some(true),
         }
     }
 
@@ -669,6 +721,77 @@ mod tests {
             sweep(&a, &[], &probe(&empty_screen())),
             Err(Refusal::NoSession)
         );
+    }
+
+    #[test]
+    fn claude_without_a_saved_conversation_is_refused() {
+        let mut p = probe(&empty_screen());
+        p.saved = Some(false);
+        assert_eq!(sweep(&agent(), &[], &p), Err(Refusal::NoConversation));
+        // Unknown fails closed.
+        p.saved = None;
+        assert_eq!(sweep(&agent(), &[], &p), Err(Refusal::NoConversation));
+        let t = table(&[]);
+        assert_eq!(
+            run(&config(), &agent(), &t, &p, SleepMode::Manual),
+            Err(Refusal::NoConversation)
+        );
+        // Force skips every guard.
+        assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Force), Ok(()));
+        // NoSession comes first.
+        let mut a = agent();
+        a.agent_session = None;
+        assert_eq!(sweep(&a, &[], &p), Err(Refusal::NoSession));
+    }
+
+    #[test]
+    fn other_kinds_are_not_checked_for_a_conversation() {
+        let mut p = probe(&empty_screen());
+        p.saved = Some(false);
+        p.info.as_mut().unwrap().foreground_processes[0].name = "codex".into();
+        let mut a = agent();
+        a.agent = Some("codex".into());
+        assert_ne!(sweep(&a, &[], &p), Err(Refusal::NoConversation));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hs-guards-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn transcript_lookup() {
+        let dir = scratch("transcript");
+        assert_eq!(claude_transcript_exists(&dir, "sid-1"), None);
+        fs::create_dir_all(dir.join("projects/-home-me-app")).unwrap();
+        fs::create_dir_all(dir.join("projects/-home-me-other")).unwrap();
+        assert_eq!(claude_transcript_exists(&dir, "sid-1"), Some(false));
+        fs::write(dir.join("projects/-home-me-other/sid-1.jsonl"), "{}").unwrap();
+        assert_eq!(claude_transcript_exists(&dir, "sid-1"), Some(true));
+        assert_eq!(claude_transcript_exists(&dir, "sid-2"), Some(false));
+        assert_eq!(claude_transcript_exists(&dir, "../sid-1"), Some(false));
+        assert_eq!(claude_transcript_exists(&dir, ""), Some(false));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_dir_resolution() {
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(
+            claude_config_dir(os("/cfg"), os("/home/me")),
+            Some(PathBuf::from("/cfg"))
+        );
+        assert_eq!(
+            claude_config_dir(None, os("/home/me")),
+            Some(PathBuf::from("/home/me/.claude"))
+        );
+        assert_eq!(
+            claude_config_dir(os(""), os("/home/me")),
+            Some(PathBuf::from("/home/me/.claude"))
+        );
+        assert_eq!(claude_config_dir(None, None), None);
     }
 
     #[test]
@@ -859,6 +982,7 @@ mod tests {
             info: None,
             env: HashMap::new(),
             screen: None,
+            saved: Some(true),
         };
         assert_eq!(
             run(&config(), &a, &table(&["make"]), &p, SleepMode::Force),
@@ -871,6 +995,7 @@ mod tests {
         let cases = [
             (Refusal::NotManaged, "not-managed"),
             (Refusal::NoSession, "no-session"),
+            (Refusal::NoConversation, "no-conversation"),
             (Refusal::NotSettled(AgentStatus::Working), "not-settled"),
             (Refusal::Focused, "focused"),
             (Refusal::NotIncluded, "not-included"),
