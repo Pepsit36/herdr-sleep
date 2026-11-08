@@ -1,0 +1,21 @@
+[package]
+name = "fake-agent"
+description = "A tiny stand-in for Claude Code used by the end-to-end suite"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not a member of the plugin workspace: it is built only inside the e2e image.
+[workspace]
+
+[[bin]]
+# Herdr detects agents by process name, so the binary must be called `claude`.
+name = "claude"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+strip = true
