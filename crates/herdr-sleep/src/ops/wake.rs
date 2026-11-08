@@ -8,6 +8,8 @@
 //! milliseconds.
 //!
 //! Journal events: `WAKE`, `READY <ms>`, `WAKE-TIMEOUT`, `WARN`.
+//!
+//! A Ready Agent is removed from the registry of sleeping panes.
 
 use std::path::Path;
 use std::time::Duration;
@@ -18,6 +20,7 @@ use crate::journal::Journal;
 
 use super::Env;
 use super::markers::sync_markers;
+use super::registry::{self, Registry};
 use super::sleep::wait_until;
 
 /// Wakes of one pane closer together than this are one Wake.
@@ -102,6 +105,7 @@ pub fn wake_agent(
     match await_ready(env, config, pane, kind) {
         Some(elapsed) => {
             restore_name(env, &journal, pane, agent.name.as_deref());
+            forget(&journal, &state_dir, pane);
             let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             journal.log("READY", &format!("{label} ({pane}) {ms}"));
             sync_markers(env, config);
@@ -166,6 +170,18 @@ pub(super) fn restore_name(env: &dyn Env, journal: &Journal, pane: &str, name: O
     };
     if let Err(error) = env.rename_agent(pane, name) {
         journal.log("WARN", &format!("{pane}: cannot restore the name: {error}"));
+    }
+}
+
+/// Remove the pane from the registry of sleeping panes: the Agent is back, so
+/// a Herdr restart must not put a Placeholder in its place. A failure is
+/// journaled and does not stop the Wake.
+pub(super) fn forget(journal: &Journal, state_dir: &Path, pane: &str) {
+    if let Err(error) = Registry::remove(state_dir, pane) {
+        journal.log(
+            "WARN",
+            &format!("{pane}: cannot update {}: {error}", registry::FILE_NAME),
+        );
     }
 }
 
@@ -429,6 +445,42 @@ pub(super) mod tests {
 
     fn wake(fake: &Fake, options: WakeOptions) -> WakeOutcome {
         wake_agent(fake, &Config::default(), "worker", options)
+    }
+
+    fn registered(fake: &Fake) {
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        for pane in ["w1:p2", "w1:p3"] {
+            Registry::add(
+                &fake.state_dir,
+                pane,
+                registry::Sleeper {
+                    kind: "claude".into(),
+                    session: "s".into(),
+                    name: None,
+                    cwd: "/".into(),
+                    since_ms: 1,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_ready_agent_leaves_the_registry() {
+        let fake = Fake::new("registry-ready");
+        registered(&fake);
+        assert_eq!(wake(&fake, WAIT), WakeOutcome::Woken { ms: 3000 });
+        let panes = Registry::load(&fake.state_dir).panes;
+        assert_eq!(panes.keys().collect::<Vec<_>>(), ["w1:p3"]);
+    }
+
+    #[test]
+    fn an_agent_that_is_not_ready_stays_registered() {
+        let mut fake = Fake::new("registry-timeout");
+        fake.prompt_after = None;
+        registered(&fake);
+        assert_eq!(wake(&fake, WAIT), WakeOutcome::TimedOut);
+        assert!(Registry::load(&fake.state_dir).panes.contains_key("w1:p2"));
     }
 
     #[test]

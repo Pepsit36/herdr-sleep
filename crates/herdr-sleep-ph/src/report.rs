@@ -5,18 +5,20 @@
 //! A failed declaration is logged and ignored: the pane must stay wakeable.
 
 use crate::args::Args;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Source under which every declaration is made.
 pub const SOURCE: &str = "pepsit36.herdr-sleep";
 
 const RENAME_TRIES: u32 = 15;
 const RENAME_DELAY: Duration = Duration::from_millis(200);
-/// How long Herdr's process detection may take to notice the Agent is gone.
-const IDENTITY_RECHECK: Duration = Duration::from_millis(1500);
+/// Poll interval while waiting for Herdr to clear the name.
+const NAME_POLL: Duration = Duration::from_millis(50);
+/// Longest wait for Herdr to clear the name. It happens a fraction of a second
+/// after the Sleeping agent appears; when it does not happen the name stays.
+const NAME_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Strictly increasing sequence numbers, starting at the epoch milliseconds.
 #[derive(Debug)]
@@ -35,22 +37,6 @@ impl Seq {
         self.0 += 1;
         n
     }
-}
-
-/// The Placeholder's own command line, with the program replaced by the bare
-/// name of the running executable: Herdr refuses a resume command whose first
-/// word is a path ("must start with a plain command name"), so it relaunches
-/// the Placeholder through `PATH` after a restart.
-pub fn own_argv(argv: &[String], exe: Option<PathBuf>) -> Vec<String> {
-    let mut own = argv.to_vec();
-    let name = exe
-        .as_deref()
-        .and_then(|exe| exe.file_name())
-        .map(|name| name.to_string_lossy().into_owned());
-    if let (Some(first), Some(name)) = (own.first_mut(), name) {
-        *first = name;
-    }
-    own
 }
 
 /// `pane <sub> <pane> --source S --seq N`. Herdr wants the pane before the
@@ -72,20 +58,18 @@ fn push(v: &mut Vec<String>, items: &[&str]) {
     v.extend(items.iter().map(|s| s.to_string()));
 }
 
-pub fn report_agent(args: &Args, seq: u64, own: &[String]) -> Vec<String> {
+pub fn report_agent(args: &Args, seq: u64) -> Vec<String> {
     let mut v = base("report-agent", args, seq);
     push(&mut v, &["--agent", &agent_name(args)]);
     push(&mut v, &["--state", "idle", "--message", "sleeping"]);
-    push(&mut v, &["--agent-session-id", &args.session, "--"]);
-    v.extend(own.iter().cloned());
+    push(&mut v, &["--agent-session-id", &args.session]);
     v
 }
 
-pub fn report_agent_session(args: &Args, seq: u64, own: &[String]) -> Vec<String> {
+pub fn report_agent_session(args: &Args, seq: u64) -> Vec<String> {
     let mut v = base("report-agent-session", args, seq);
     push(&mut v, &["--agent", &agent_name(args)]);
-    push(&mut v, &["--agent-session-id", &args.session, "--"]);
-    v.extend(own.iter().cloned());
+    push(&mut v, &["--agent-session-id", &args.session]);
     v
 }
 
@@ -108,6 +92,20 @@ pub fn clear_token(args: &Args, seq: u64) -> Vec<String> {
     let mut v = base("report-metadata", args, seq);
     push(&mut v, &["--clear-token", &args.token]);
     v
+}
+
+/// `agent get <pane>`.
+pub fn get_agent(args: &Args) -> Vec<String> {
+    ["agent", "get", &args.pane]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Whether the JSON Herdr printed for an agent carries a `name`. Herdr leaves
+/// the key out when the agent has none; `display_agent` is a different key.
+pub fn has_name(json: &str) -> bool {
+    json.contains("\"name\":\"")
 }
 
 pub fn rename(args: &Args, name: &str) -> Vec<String> {
@@ -154,35 +152,71 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// The Sleeping agent identity: state, session, resume command and name.
-    fn identity(&mut self, own: &[String]) {
+    /// Standard output of `herdr <argv>`, `None` when it failed.
+    fn output(&self, argv: &[String]) -> Option<String> {
+        let out = Command::new(&self.args.herdr_bin)
+            .args(argv)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// The Sleeping agent identity: state, session and name.
+    fn identity(&mut self) {
         let seq = self.seq.next();
-        self.run(&report_agent(self.args, seq, own));
+        self.run(&report_agent(self.args, seq));
         let seq = self.seq.next();
-        self.run(&report_agent_session(self.args, seq, own));
-        if let Some(name) = &self.args.name {
-            // Herdr needs a moment to register the agent before a rename.
-            let rename = rename(self.args, name);
-            for attempt in 0..RENAME_TRIES {
-                if attempt > 0 {
-                    sleep(RENAME_DELAY);
-                }
-                if self.run(&rename) {
-                    break;
-                }
+        self.run(&report_agent_session(self.args, seq));
+        self.rename();
+    }
+
+    /// Names the agent. Herdr needs a moment to register it first, so the
+    /// call is retried.
+    fn rename(&mut self) {
+        let Some(name) = &self.args.name else {
+            return;
+        };
+        let rename = rename(self.args, name);
+        for attempt in 0..RENAME_TRIES {
+            if attempt > 0 {
+                sleep(RENAME_DELAY);
+            }
+            if self.run(&rename) {
+                break;
+            }
+        }
+    }
+
+    /// Herdr's own process detection clears the name of the pane a fraction
+    /// of a second after the Sleeping agent appears. Wait until the name is
+    /// gone and give it again; no wait at all for a pane without a name.
+    fn keep_name(&mut self) {
+        if self.args.name.is_none() {
+            return;
+        }
+        let deadline = Instant::now() + NAME_WINDOW;
+        while Instant::now() < deadline {
+            sleep(NAME_POLL);
+            if self
+                .output(&get_agent(self.args))
+                .is_some_and(|json| !has_name(&json))
+            {
+                self.rename();
+                return;
             }
         }
     }
 
     /// Announces the Sleeping agent and the Sleep marker.
-    pub fn declare(&mut self, own: &[String]) {
-        self.identity(own);
+    pub fn declare(&mut self) {
+        self.identity();
         let seq = self.seq.next();
         self.run(&set_token(self.args, seq));
-        // A moment after the Agent's process is gone, Herdr's own detection
-        // clears the name and the resume command of the pane: say it again.
-        sleep(IDENTITY_RECHECK);
-        self.identity(own);
+        self.keep_name();
     }
 
     /// Removes the Sleep marker and the Sleeping agent identity.
@@ -199,18 +233,13 @@ mod tests {
     use super::*;
     use crate::args::sample;
 
-    fn own() -> Vec<String> {
-        vec!["/bin/herdr-sleep-ph".into(), "--pane".into(), "w1-2".into()]
-    }
-
     #[test]
-    fn report_agent_declares_identity_and_own_command() {
-        let v = report_agent(&sample(), 7, &own());
+    fn report_agent_declares_identity_without_a_resume_command() {
+        let v = report_agent(&sample(), 7);
         assert_eq!(
             v.join(" "),
             "pane report-agent w1-2 --source pepsit36.herdr-sleep --seq 7 --agent sleeping-claude \
-             --state idle --message sleeping --agent-session-id sess-1 -- \
-             /bin/herdr-sleep-ph --pane w1-2"
+             --state idle --message sleeping --agent-session-id sess-1"
         );
     }
 
@@ -218,10 +247,9 @@ mod tests {
     fn session_release_and_tokens() {
         let a = sample();
         assert_eq!(
-            report_agent_session(&a, 8, &own()).join(" "),
+            report_agent_session(&a, 8).join(" "),
             "pane report-agent-session w1-2 --source pepsit36.herdr-sleep --seq 8 \
-             --agent sleeping-claude --agent-session-id sess-1 -- \
-             /bin/herdr-sleep-ph --pane w1-2"
+             --agent sleeping-claude --agent-session-id sess-1"
         );
         assert_eq!(
             release_agent(&a, 9).join(" "),
@@ -240,23 +268,23 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_told_from_a_display_name() {
+        assert!(has_name(
+            r#"{"agent":"sleeping-claude","name":"alpha","pane_id":"p"}"#
+        ));
+        assert!(!has_name(
+            r#"{"agent":"sleeping-claude","display_agent":"alpha"}"#
+        ));
+        assert!(!has_name(r#"{"agent":"sleeping-claude","pane_id":"p"}"#));
+        assert_eq!(get_agent(&sample()).join(" "), "agent get w1-2");
+    }
+
+    #[test]
     fn seq_is_strictly_increasing_from_now() {
         let mut seq = Seq::starting_at_now();
         let a = seq.next();
         let b = seq.next();
         assert_eq!(b, a + 1);
         assert!(a > 1_700_000_000_000);
-    }
-
-    #[test]
-    fn own_argv_uses_the_bare_executable_name() {
-        let argv = vec![
-            "/opt/x/herdr-sleep-ph".to_string(),
-            "--pane".into(),
-            "p".into(),
-        ];
-        let own = own_argv(&argv, Some(PathBuf::from("/opt/x/herdr-sleep-ph")));
-        assert_eq!(own, vec!["herdr-sleep-ph", "--pane", "p"]);
-        assert_eq!(own_argv(&argv, None), argv);
     }
 }

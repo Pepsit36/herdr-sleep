@@ -6,9 +6,10 @@
 //! `sleep_after_minutes` is put to sleep. The clocks live in
 //! `<state_dir>/sweep.json` so a restarted Watcher keeps counting.
 //!
-//! Journal events: the ones of [`sleep_agent`](super::sleep_agent).
+//! Journal events: the ones of [`sleep_agent`](super::sleep_agent), and
+//! `PRUNE` when a pane of the registry of sleeping panes is gone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,7 @@ use crate::guards::SleepMode;
 use crate::herdr::{Agent, Snapshot};
 use crate::journal::Journal;
 
+use super::registry::{self, Registry};
 use super::{Env, SleepOutcome, sleep_agent, sync_markers};
 
 /// Most agents put to sleep in one pass. A sleep takes seconds, so the rest
@@ -112,6 +114,32 @@ pub fn signature(agent: &Agent, focused: bool) -> String {
     )
 }
 
+/// Forget the sleeping panes that no longer exist. A snapshot without any pane
+/// is not trusted: it more likely means Herdr is still restoring its session
+/// than that every pane was closed.
+fn prune_registry(env: &dyn Env, snapshot: &Snapshot) {
+    let Some(dir) = env.state_dir() else {
+        return;
+    };
+    if snapshot.panes.is_empty() {
+        return;
+    }
+    let alive: HashSet<&str> = snapshot.panes.iter().map(|p| p.pane_id.as_str()).collect();
+    match Registry::prune(&dir, &alive) {
+        Ok(gone) => {
+            for pane in gone {
+                Journal::new(&dir).log("PRUNE", &format!("{pane} no longer exists"));
+            }
+        }
+        Err(error) => {
+            Journal::new(&dir).log(
+                "WARN",
+                &format!("cannot prune {}: {error}", registry::FILE_NAME),
+            );
+        }
+    }
+}
+
 /// Run one Sweep: update the idle clocks in `state` and put to sleep the
 /// agents that are due.
 pub fn sweep_once(env: &dyn Env, config: &Config, state: &mut SweepState) -> SweepReport {
@@ -133,6 +161,7 @@ pub fn sweep_with_mode(
             return report;
         }
     };
+    prune_registry(env, &snapshot);
     let now = env.now_millis();
     let sleep_after_ms = u64::try_from(config.sleep_after().as_millis()).unwrap_or(u64::MAX);
 
@@ -226,6 +255,7 @@ mod tests {
         focused: RefCell<Option<String>>,
         refusals: RefCell<HashMap<String, Refusal>>,
         snapshot_error: Cell<bool>,
+        panes: RefCell<Vec<String>>,
     }
 
     impl Fake {
@@ -246,6 +276,7 @@ mod tests {
                 focused: RefCell::new(None),
                 refusals: RefCell::new(HashMap::new()),
                 snapshot_error: Cell::new(false),
+                panes: RefCell::new(Vec::new()),
             }
         }
 
@@ -294,6 +325,15 @@ mod tests {
                 return Err("socket closed".into());
             }
             Ok(Snapshot {
+                panes: self
+                    .panes
+                    .borrow()
+                    .iter()
+                    .map(|pane| Pane {
+                        pane_id: pane.clone(),
+                        ..Pane::default()
+                    })
+                    .collect(),
                 agents: self.agents.borrow().clone(),
                 focused_pane_id: self.focused.borrow().clone(),
                 ..Snapshot::default()
@@ -588,6 +628,40 @@ mod tests {
         assert!(json["agents"]["p1"]["skip"].is_null());
         assert!(!fake.state_dir.join("sweep.json.tmp").exists());
         assert_eq!(SweepState::load(&fake.state_dir), state);
+    }
+
+    fn register(fake: &Fake, panes: &[&str]) {
+        for pane in panes {
+            let sleeper = registry::Sleeper {
+                kind: "claude".into(),
+                session: "s".into(),
+                name: None,
+                cwd: "/".into(),
+                since_ms: 1,
+            };
+            Registry::add(&fake.state_dir, pane, sleeper).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_sweep_prunes_the_sleepers_whose_pane_is_gone() {
+        let fake = Fake::new("prune");
+        register(&fake, &["p1", "p2", "p3"]);
+        *fake.panes.borrow_mut() = vec!["p2".into(), "p9".into()];
+        pass(&fake, &config(30), &mut SweepState::default());
+        let panes = Registry::load(&fake.state_dir).panes;
+        assert_eq!(panes.keys().collect::<Vec<_>>(), ["p2"]);
+        let journal = fs::read_to_string(fake.state_dir.join("herdr-sleep.log")).unwrap();
+        assert!(journal.contains("PRUNE p1 no longer exists"));
+        assert!(journal.contains("PRUNE p3 no longer exists"));
+    }
+
+    #[test]
+    fn a_snapshot_without_panes_prunes_nothing() {
+        let fake = Fake::new("prune-empty");
+        register(&fake, &["p1"]);
+        pass(&fake, &config(30), &mut SweepState::default());
+        assert!(Registry::load(&fake.state_dir).panes.contains_key("p1"));
     }
 
     #[test]

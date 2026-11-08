@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         Invocation::Config { json } => cli::config(json),
         Invocation::Watch { detach } => cli::watch(detach),
         Invocation::EnsureWatcher { json } => cli::ensure_watcher(json),
+        Invocation::Restore { json } => cli::restore(json),
         Invocation::Event => cli::event(),
         Invocation::Replay(args) => cli::replay_command(&args),
         Invocation::Usage(message) => usage_failure(&message),

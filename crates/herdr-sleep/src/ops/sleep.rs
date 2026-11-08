@@ -10,6 +10,10 @@
 //!
 //! Journal events: `SKIP`, `DRY-RUN`, `SLEEP`, `ABORT`, `ASLEEP`, `WARN`.
 //!
+//! Once the Sleeping agent is announced (or the Placeholder started without
+//! announcing), the pane is added to the registry so that `restore` can bring
+//! it back after a Herdr restart (ADR 0008).
+//!
 //! Markers (sleep icon on the pane, tab and workspace) are synchronised by
 //! the caller, not here.
 
@@ -23,6 +27,7 @@ use crate::journal::Journal;
 
 use super::Env;
 use super::markers::sync_markers;
+use super::registry::{self, Registry, Sleeper};
 
 /// Pause between typing the exit command and pressing Enter, so an
 /// autocomplete menu opened by the command can settle.
@@ -251,9 +256,29 @@ pub fn sleep_agent(
     if !announced {
         let reason = format!("placeholder did not report sleeping-{kind}");
         journal.log("WARN", &format!("{label} ({pane}): {reason}"));
+        // The Placeholder runs, only its report is missing: it may still be
+        // restored after a restart.
+        register(
+            env,
+            &journal,
+            pane,
+            kind,
+            session,
+            agent.name.as_deref(),
+            cwd,
+        );
         sync_markers(env, config);
         return SleepOutcome::Warned(reason);
     }
+    register(
+        env,
+        &journal,
+        pane,
+        kind,
+        session,
+        agent.name.as_deref(),
+        cwd,
+    );
     let freed_mb = freed_kb / 1024;
     journal.log(
         "ASLEEP",
@@ -267,6 +292,35 @@ pub fn sleep_agent(
     }
     sync_markers(env, config);
     SleepOutcome::Asleep { freed_kb }
+}
+
+/// Record the sleeping pane in the registry. A failure is journaled and does
+/// not change the outcome of the Sleep.
+fn register(
+    env: &dyn Env,
+    journal: &Journal,
+    pane: &str,
+    kind: &str,
+    session: &str,
+    name: Option<&str>,
+    cwd: &str,
+) {
+    let Some(state_dir) = env.state_dir() else {
+        return;
+    };
+    let sleeper = Sleeper {
+        kind: kind.to_string(),
+        session: session.to_string(),
+        name: name.filter(|n| !n.is_empty()).map(str::to_string),
+        cwd: cwd.to_string(),
+        since_ms: env.now_millis(),
+    };
+    if let Err(error) = Registry::add(&state_dir, pane, sleeper) {
+        journal.log(
+            "WARN",
+            &format!("{pane}: cannot save {}: {error}", registry::FILE_NAME),
+        );
+    }
 }
 
 /// `<icon> <name or pane> (<kind>) went to sleep, freed <N> MB`, without the
@@ -674,6 +728,47 @@ mod tests {
 
     fn exec_call(fake: &Fake) -> Option<String> {
         fake.calls().into_iter().find(|c| c.starts_with("run "))
+    }
+
+    #[test]
+    fn an_announced_sleeper_is_registered() {
+        let fake = Fake::new("registry");
+        run(&fake, SleepMode::Sweep);
+        let registry = Registry::load(fake.dir());
+        assert_eq!(
+            registry.panes.get("w1-2"),
+            Some(&Sleeper {
+                kind: "claude".into(),
+                session: "sess-1".into(),
+                name: Some("worker".into()),
+                cwd: "/work".into(),
+                since_ms: fake.now_millis(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unannounced_placeholder_is_registered_too() {
+        let mut fake = Fake::new("registry-warned");
+        fake.sleeping_after = None;
+        assert!(matches!(
+            run(&fake, SleepMode::Sweep),
+            SleepOutcome::Warned(_)
+        ));
+        assert!(Registry::load(fake.dir()).panes.contains_key("w1-2"));
+    }
+
+    #[test]
+    fn a_refused_or_aborted_sleep_registers_nothing() {
+        let mut fake = Fake::new("registry-refused");
+        fake.guards = Err(Refusal::DraftInPrompt);
+        run(&fake, SleepMode::Manual);
+        let mut fake_aborted = Fake::new("registry-aborted");
+        fake_aborted.release_after = None;
+        run(&fake_aborted, SleepMode::Manual);
+        for fake in [&fake, &fake_aborted] {
+            assert!(Registry::load(fake.dir()).panes.is_empty());
+        }
     }
 
     #[test]

@@ -204,19 +204,20 @@ fn declares_shows_replays_and_hands_over() {
     ));
     assert!(h.screen.contains("session: sess-1"));
 
-    wait_for("the identity to be declared twice", || {
-        h.herdr_log().len() >= 7
-    });
+    wait_for("the identity to be declared", || h.herdr_log().len() >= 6);
     let log = h.herdr_log();
     let src = "--source pepsit36.herdr-sleep";
-    assert_eq!(log.len(), 7, "{log:?}");
+    assert_eq!(log.len(), 6, "{log:?}");
     assert!(log[0].starts_with(&format!("pane report-agent 1-2 {src} --seq ")));
-    assert!(log[0].contains(
-        "--agent sleeping-claude --state idle --message sleeping --agent-session-id sess-1 -- "
-    ));
-    assert!(log[0].contains(" -- herdr-sleep-ph --pane "), "{}", log[0]);
-    assert!(log[0].ends_with("-- claude --resume sess-1"), "{}", log[0]);
+    assert!(
+        log[0].ends_with(
+            "--agent sleeping-claude --state idle --message sleeping --agent-session-id sess-1"
+        ),
+        "{}",
+        log[0]
+    );
     assert!(log[1].starts_with(&format!("pane report-agent-session 1-2 {src} --seq ")));
+    assert!(log[1].ends_with("--agent-session-id sess-1"), "{}", log[1]);
     assert_eq!(log[2], "agent rename 1-2 worker");
     assert!(
         log[3].starts_with("pane report-metadata 1-2 --source"),
@@ -224,14 +225,10 @@ fn declares_shows_replays_and_hands_over() {
         log[3]
     );
     assert!(log[3].ends_with("--token sleep=z"), "{}", log[3]);
-    // The identity is declared once more after Herdr dropped the Agent's own.
-    assert!(log[4].starts_with("pane report-agent 1-2 "), "{}", log[4]);
-    assert!(
-        log[5].starts_with("pane report-agent-session 1-2 "),
-        "{}",
-        log[5]
-    );
-    assert_eq!(log[6], "agent rename 1-2 worker");
+    // The stub reports no name, as Herdr does once its own detection cleared
+    // it: the name is given again.
+    assert_eq!(log[4], "agent get 1-2");
+    assert_eq!(log[5], "agent rename 1-2 worker");
 
     #[cfg(target_os = "linux")]
     {
@@ -273,15 +270,15 @@ fn declares_shows_replays_and_hands_over() {
     );
 
     let log = h.herdr_log();
-    assert_eq!(log.len(), 9, "{log:?}");
+    assert_eq!(log.len(), 8, "{log:?}");
     assert!(
-        log[7].starts_with("pane report-metadata 1-2 --source"),
+        log[6].starts_with("pane report-metadata 1-2 --source"),
         "{}",
-        log[7]
+        log[6]
     );
-    assert!(log[7].ends_with("--clear-token sleep"), "{}", log[7]);
-    assert!(log[8].starts_with(&format!("pane release-agent 1-2 {src} --seq ")));
-    assert!(log[8].ends_with("--agent sleeping-claude"), "{}", log[8]);
+    assert!(log[6].ends_with("--clear-token sleep"), "{}", log[6]);
+    assert!(log[7].starts_with(&format!("pane release-agent 1-2 {src} --seq ")));
+    assert!(log[7].ends_with("--agent sleeping-claude"), "{}", log[7]);
     let seqs: Vec<u64> = [
         "pane report-agent ",
         "pane report-agent-session",

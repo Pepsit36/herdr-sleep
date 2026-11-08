@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Restart:** sleeping panes are restored after a Herdr restart: the plugin puts the Placeholder back in every pane that was asleep, without starting any agent. Set `[session] resume_agents_on_restore = false` in Herdr's config so that Herdr does not relaunch every agent at once.
+
 ## [0.1.0] - 2026-11-08
 
 <!-- stamped -->

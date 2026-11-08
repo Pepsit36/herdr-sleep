@@ -47,8 +47,6 @@ RUN set -eu; \
 COPY --from=build /out/claude /usr/local/bin/claude
 COPY --from=build /out/herdr-sleep /out/herdr-sleep-ph /opt/herdr-sleep/bin/
 COPY --from=build /out/herdr-plugin.toml /opt/herdr-sleep/herdr-plugin.toml
-# Herdr relaunches the Placeholder after a restart by its bare command name, which must be on PATH.
-RUN ln -s /opt/herdr-sleep/bin/herdr-sleep-ph /usr/local/bin/herdr-sleep-ph
 COPY tests/e2e/run.sh /e2e/run.sh
 
 RUN useradd --create-home --shell /bin/bash tester

@@ -172,7 +172,7 @@ new_world() {
   CONFIG_DIR="$HOME/.config/herdr/plugins/config/$PLUGIN_ID"
   cat >"$HOME/.config/herdr/config.toml" <<'EOF'
 [session]
-resume_agents_on_restore = true
+resume_agents_on_restore = false
 EOF
   mkdir -p "$CONFIG_DIR" "$STATE_DIR"
   printf '%s\n' "$1" >"$CONFIG_DIR/config.toml"
@@ -241,7 +241,6 @@ s1_sleep_by_sweep() {
     sleep 1
   done
   if wait_for 20 is_asleep "$PANE_A"; then ok "alpha is sleeping-claude after the sweep"; else bad "alpha is not sleeping-claude (kind=$(agent_kind "$PANE_A"))"; fi
-  # The Placeholder gives the name again about 1.5 s after it starts: poll.
   if wait_for 15 is_named "$PANE_A" alpha; then ok "the name alpha is kept"; else bad "the name is '$(agent_name "$PANE_A")', expected alpha"; fi
   if [ "$(agent_status "$PANE_A")" = "idle" ]; then ok "the Sleeping agent is idle"; else bad "status is '$(agent_status "$PANE_A")'"; fi
   local pid
@@ -304,10 +303,6 @@ s4_control_keys() {
 s5_restart() {
   new_world "$CONFIG_MANUAL" || return
   sleep_alpha || return
-  # The Placeholder declares its identity a second time 1.5 s after it starts, once Herdr's
-  # process detection has stopped seeing the agent. Nothing observable marks that moment, so
-  # wait it out before stopping the server.
-  sleep 3
   if stop_server; then ok "the server stopped"; else
     bad "the server did not stop"
     return
@@ -317,15 +312,17 @@ s5_restart() {
     return
   fi
   attach_client
-  if wait_for 60 is_asleep "$PANE_A"; then ok "alpha's pane is sleeping-claude again, with no manual restore"; else
+  if wait_for 60 is_asleep "$PANE_A"; then ok "alpha's pane is sleeping-claude again, restored by the plugin"; else
     bad "after the restart the pane is kind='$(agent_kind "$PANE_A")' (expected sleeping-claude)"
     note "agents: $(herdr agent list 2>&1 | head -c 400)"
     note "processes: $(ps -u "$(id -u)" -o pid=,args= | cut -c1-110 | tr '\n' '|')"
     return
   fi
-  if [ -n "$(placeholder_pid "$PANE_A")" ]; then ok "a Placeholder runs in the pane (relaunched by Herdr)"; else bad "no Placeholder process in the pane"; fi
+  if [ -n "$(placeholder_pid "$PANE_A")" ]; then ok "a Placeholder runs in the pane (started by the plugin, not on PATH)"; else bad "no Placeholder process in the pane"; fi
   if pgrep -u "$(id -u)" -x claude >/dev/null; then bad "a claude process runs after the restart"; else ok "no agent process was started"; fi
   if wait_for 15 is_named "$PANE_A" alpha; then ok "the name alpha is kept"; else bad "the name after the restart is '$(agent_name "$PANE_A")'"; fi
+  if grep -q "RESTORE $PANE_A" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; then ok "the journal records the restore"; else bad "no RESTORE line in the journal"; fi
+  if command -v herdr-sleep-ph >/dev/null; then bad "herdr-sleep-ph is on PATH"; else ok "herdr-sleep-ph is not on PATH"; fi
   herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
   if wait_for 40 is_awake_idle "$PANE_A"; then ok "the restored pane wakes"; else bad "the restored pane did not wake (kind=$(agent_kind "$PANE_A"))"; fi
   if [ "$(agent_session "$PANE_A")" = "$SID" ]; then ok "same session id after restart and wake"; else bad "session id is '$(agent_session "$PANE_A")', expected $SID"; fi

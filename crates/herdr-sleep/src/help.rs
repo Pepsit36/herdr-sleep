@@ -19,6 +19,7 @@ Commands:
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running
+  restore [--json]            Bring sleeping panes back after a Herdr restart
 
 Run 'herdr-sleep <command> --help' for the options of a command.
 Without a pane or name, sleep and wake act on the pane of the Herdr action
@@ -35,8 +36,8 @@ Exit codes:
 
 Files:
   config      <config dir>/config.toml (see 'herdr-sleep config' for the path)
-  state       <state dir>/ with sweep.json (idle clocks), watcher.lock
-              and herdr-sleep.log (the journal)
+  state       <state dir>/ with sweep.json (idle clocks), sleepers.json
+              (sleeping panes), watcher.lock and herdr-sleep.log (the journal)
 ";
 
 const SLEEP: &str = "\
@@ -170,6 +171,25 @@ Exit codes:
   1  the watcher could not be started
 ";
 
+const RESTORE: &str = "\
+Usage: herdr-sleep restore [--json]
+
+Command of the startup hook. After a Herdr restart, put the Placeholder
+back in every pane that was asleep before it: the pane must still exist,
+run no agent and sit at its shell prompt. Panes that do not qualify are
+left alone and the reason goes to the journal. Then make sure the watcher
+runs. Always exits 0 unless the command line is wrong.
+
+Options:
+  --json      Print one JSON object instead of lines:
+              restored (panes), skipped (array of [pane, reason]),
+              error (string or null)
+
+Exit codes:
+  0  the pass ran, or could not run (the journal says why)
+  2  usage error
+";
+
 const REPLAY: &str = "\
 Usage: herdr-sleep replay --pane <id> [--name <name>] --kind <kind> --file <path>
 
@@ -188,6 +208,7 @@ pub fn command(name: &str) -> Option<&'static str> {
         "watch" => WATCH,
         "event" => EVENT,
         "ensure-watcher" => ENSURE_WATCHER,
+        "restore" => RESTORE,
         "replay" => REPLAY,
         _ => return None,
     })
@@ -252,6 +273,7 @@ Commands:
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running
+  restore [--json]            Bring sleeping panes back after a Herdr restart
 
 Run 'herdr-sleep <command> --help' for the options of a command.
 Without a pane or name, sleep and wake act on the pane of the Herdr action
@@ -268,8 +290,8 @@ Exit codes:
 
 Files:
   config      <config dir>/config.toml (see 'herdr-sleep config' for the path)
-  state       <state dir>/ with sweep.json (idle clocks), watcher.lock
-              and herdr-sleep.log (the journal)
+  state       <state dir>/ with sweep.json (idle clocks), sleepers.json
+              (sleeping panes), watcher.lock and herdr-sleep.log (the journal)
 ";
         assert_eq!(MAIN, expected);
     }
