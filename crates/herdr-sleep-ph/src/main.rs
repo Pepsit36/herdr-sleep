@@ -38,7 +38,6 @@ fn main() -> ExitCode {
     let raw = tty::RawMode::enter();
     let own = report::own_argv(&argv, std::env::current_exe().ok());
     let mut reporter = report::Reporter::new(&args);
-    reporter.declare(&own);
 
     let preview = args.preview.as_deref().and_then(screen::load_preview);
     let banner = screen::Banner {
@@ -51,6 +50,8 @@ fn main() -> ExitCode {
     let _ = stdout.write_all(screen::render(preview.as_deref(), &banner).as_bytes());
     let _ = stdout.flush();
 
+    // Keys typed while Herdr is told are kept by the terminal for `capture`.
+    reporter.declare(&own);
     let captured = tty::capture(raw.is_some());
     reporter.release();
     handoff::run(&args, raw, &captured)

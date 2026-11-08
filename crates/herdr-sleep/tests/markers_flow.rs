@@ -89,11 +89,9 @@ fn a_sleeping_pane_marks_its_workspace_and_tab() {
     let calls = sandbox.calls();
     assert_eq!(calls.len(), 3, "{calls:?}");
     assert_eq!(calls[0], "api snapshot");
-    let prefix = "workspace report-metadata --source pepsit36.herdr-sleep --token sleep=💤 --seq ";
-    assert!(
-        calls[1].starts_with(prefix) && calls[1].ends_with(" w3"),
-        "{calls:?}"
-    );
+    let prefix =
+        "workspace report-metadata w3 --source pepsit36.herdr-sleep --token sleep=💤 --seq ";
+    assert!(calls[1].starts_with(prefix), "{calls:?}");
     assert_eq!(calls[2], "tab rename w3:t1 💤 1");
 
     let state = MarkersState::load(&sandbox.dir.join("state"));

@@ -15,6 +15,8 @@ pub const SOURCE: &str = "pepsit36.herdr-sleep";
 
 const RENAME_TRIES: u32 = 15;
 const RENAME_DELAY: Duration = Duration::from_millis(200);
+/// How long Herdr's process detection may take to notice the Agent is gone.
+const IDENTITY_RECHECK: Duration = Duration::from_millis(1500);
 
 /// Strictly increasing sequence numbers, starting at the epoch milliseconds.
 #[derive(Debug)]
@@ -35,19 +37,27 @@ impl Seq {
     }
 }
 
-/// The Placeholder's own command line, with the program replaced by the
-/// absolute path of the running executable, so that Herdr relaunches exactly
-/// this command after a restart.
+/// The Placeholder's own command line, with the program replaced by the bare
+/// name of the running executable: Herdr refuses a resume command whose first
+/// word is a path ("must start with a plain command name"), so it relaunches
+/// the Placeholder through `PATH` after a restart.
 pub fn own_argv(argv: &[String], exe: Option<PathBuf>) -> Vec<String> {
     let mut own = argv.to_vec();
-    if let (Some(first), Some(exe)) = (own.first_mut(), exe) {
-        *first = exe.to_string_lossy().into_owned();
+    let name = exe
+        .as_deref()
+        .and_then(|exe| exe.file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    if let (Some(first), Some(name)) = (own.first_mut(), name) {
+        *first = name;
     }
     own
 }
 
-fn base(sub: &str, seq: u64) -> Vec<String> {
-    ["pane", sub, "--source", SOURCE]
+/// `pane <sub> <pane> --source S --seq N`. Herdr wants the pane before the
+/// options: with the pane last it rejects the value of the first option
+/// ("unknown option") on `report-metadata` and `release-agent`.
+fn base(sub: &str, args: &Args, seq: u64) -> Vec<String> {
+    ["pane", sub, &args.pane, "--source", SOURCE]
         .iter()
         .map(|s| s.to_string())
         .chain(["--seq".to_string(), seq.to_string()])
@@ -63,48 +73,40 @@ fn push(v: &mut Vec<String>, items: &[&str]) {
 }
 
 pub fn report_agent(args: &Args, seq: u64, own: &[String]) -> Vec<String> {
-    let mut v = base("report-agent", seq);
+    let mut v = base("report-agent", args, seq);
     push(&mut v, &["--agent", &agent_name(args)]);
     push(&mut v, &["--state", "idle", "--message", "sleeping"]);
-    push(
-        &mut v,
-        &["--agent-session-id", &args.session, &args.pane, "--"],
-    );
+    push(&mut v, &["--agent-session-id", &args.session, "--"]);
     v.extend(own.iter().cloned());
     v
 }
 
 pub fn report_agent_session(args: &Args, seq: u64, own: &[String]) -> Vec<String> {
-    let mut v = base("report-agent-session", seq);
+    let mut v = base("report-agent-session", args, seq);
     push(&mut v, &["--agent", &agent_name(args)]);
-    push(
-        &mut v,
-        &["--agent-session-id", &args.session, &args.pane, "--"],
-    );
+    push(&mut v, &["--agent-session-id", &args.session, "--"]);
     v.extend(own.iter().cloned());
     v
 }
 
 pub fn release_agent(args: &Args, seq: u64) -> Vec<String> {
-    let mut v = base("release-agent", seq);
-    push(&mut v, &["--agent", &agent_name(args), &args.pane]);
+    let mut v = base("release-agent", args, seq);
+    push(&mut v, &["--agent", &agent_name(args)]);
     v
 }
 
 pub fn set_token(args: &Args, seq: u64) -> Vec<String> {
-    let mut v = base("report-metadata", seq);
+    let mut v = base("report-metadata", args, seq);
     push(
         &mut v,
         &["--token", &format!("{}={}", args.token, args.icon)],
     );
-    v.push(args.pane.clone());
     v
 }
 
 pub fn clear_token(args: &Args, seq: u64) -> Vec<String> {
-    let mut v = base("report-metadata", seq);
+    let mut v = base("report-metadata", args, seq);
     push(&mut v, &["--clear-token", &args.token]);
-    v.push(args.pane.clone());
     v
 }
 
@@ -152,8 +154,8 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Announces the Sleeping agent and the Sleep marker.
-    pub fn declare(&mut self, own: &[String]) {
+    /// The Sleeping agent identity: state, session, resume command and name.
+    fn identity(&mut self, own: &[String]) {
         let seq = self.seq.next();
         self.run(&report_agent(self.args, seq, own));
         let seq = self.seq.next();
@@ -170,8 +172,17 @@ impl<'a> Reporter<'a> {
                 }
             }
         }
+    }
+
+    /// Announces the Sleeping agent and the Sleep marker.
+    pub fn declare(&mut self, own: &[String]) {
+        self.identity(own);
         let seq = self.seq.next();
         self.run(&set_token(self.args, seq));
+        // A moment after the Agent's process is gone, Herdr's own detection
+        // clears the name and the resume command of the pane: say it again.
+        sleep(IDENTITY_RECHECK);
+        self.identity(own);
     }
 
     /// Removes the Sleep marker and the Sleeping agent identity.
@@ -197,8 +208,8 @@ mod tests {
         let v = report_agent(&sample(), 7, &own());
         assert_eq!(
             v.join(" "),
-            "pane report-agent --source pepsit36.herdr-sleep --seq 7 --agent sleeping-claude \
-             --state idle --message sleeping --agent-session-id sess-1 w1-2 -- \
+            "pane report-agent w1-2 --source pepsit36.herdr-sleep --seq 7 --agent sleeping-claude \
+             --state idle --message sleeping --agent-session-id sess-1 -- \
              /bin/herdr-sleep-ph --pane w1-2"
         );
     }
@@ -208,22 +219,22 @@ mod tests {
         let a = sample();
         assert_eq!(
             report_agent_session(&a, 8, &own()).join(" "),
-            "pane report-agent-session --source pepsit36.herdr-sleep --seq 8 \
-             --agent sleeping-claude --agent-session-id sess-1 w1-2 -- \
+            "pane report-agent-session w1-2 --source pepsit36.herdr-sleep --seq 8 \
+             --agent sleeping-claude --agent-session-id sess-1 -- \
              /bin/herdr-sleep-ph --pane w1-2"
         );
         assert_eq!(
             release_agent(&a, 9).join(" "),
-            "pane release-agent --source pepsit36.herdr-sleep --seq 9 \
-             --agent sleeping-claude w1-2"
+            "pane release-agent w1-2 --source pepsit36.herdr-sleep --seq 9 \
+             --agent sleeping-claude"
         );
         assert_eq!(
             set_token(&a, 1).join(" "),
-            "pane report-metadata --source pepsit36.herdr-sleep --seq 1 --token sleep=z w1-2"
+            "pane report-metadata w1-2 --source pepsit36.herdr-sleep --seq 1 --token sleep=z"
         );
         assert_eq!(
             clear_token(&a, 2).join(" "),
-            "pane report-metadata --source pepsit36.herdr-sleep --seq 2 --clear-token sleep w1-2"
+            "pane report-metadata w1-2 --source pepsit36.herdr-sleep --seq 2 --clear-token sleep"
         );
         assert_eq!(rename(&a, "worker").join(" "), "agent rename w1-2 worker");
     }
@@ -238,10 +249,14 @@ mod tests {
     }
 
     #[test]
-    fn own_argv_uses_the_absolute_executable() {
-        let argv = vec!["herdr-sleep-ph".to_string(), "--pane".into(), "p".into()];
-        let own = own_argv(&argv, Some(PathBuf::from("/opt/herdr-sleep-ph")));
-        assert_eq!(own, vec!["/opt/herdr-sleep-ph", "--pane", "p"]);
+    fn own_argv_uses_the_bare_executable_name() {
+        let argv = vec![
+            "/opt/x/herdr-sleep-ph".to_string(),
+            "--pane".into(),
+            "p".into(),
+        ];
+        let own = own_argv(&argv, Some(PathBuf::from("/opt/x/herdr-sleep-ph")));
+        assert_eq!(own, vec!["herdr-sleep-ph", "--pane", "p"]);
         assert_eq!(own_argv(&argv, None), argv);
     }
 }

@@ -104,16 +104,16 @@ fn working_dir(cwd: &str) -> PathBuf {
 /// executed.
 pub fn run(args: &Args, raw: Option<RawMode>, captured: &[u8]) -> ExitCode {
     let text = printable(captured);
-    if !text.is_empty() {
-        let file = replay_path(&args.state_dir, &args.pane);
-        match write_replay(&file, &text) {
-            Ok(()) => {
-                if let Err(e) = spawn_replay(args, &file) {
-                    eprintln!("herdr-sleep-ph: cannot start {}: {e}", args.main_bin);
-                }
+    // Started even with nothing to type: the Replay also gives the pane its
+    // name back, which Herdr forgot while the Placeholder held the pane.
+    let file = replay_path(&args.state_dir, &args.pane);
+    match write_replay(&file, &text) {
+        Ok(()) => {
+            if let Err(e) = spawn_replay(args, &file) {
+                eprintln!("herdr-sleep-ph: cannot start {}: {e}", args.main_bin);
             }
-            Err(e) => eprintln!("herdr-sleep-ph: cannot write {}: {e}", file.display()),
         }
+        Err(e) => eprintln!("herdr-sleep-ph: cannot write {}: {e}", file.display()),
     }
 
     drop(raw);

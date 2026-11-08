@@ -431,9 +431,19 @@ impl HerdrClient {
         serde_json::from_value(value).map_err(|e| HerdrError::decode(key, e))
     }
 
-    /// Run a call whose result is not needed.
+    /// Run a call whose result is not needed. Several Herdr commands
+    /// (`pane send-text`, `pane send-keys`, `pane run`, the `report-*`
+    /// family) print nothing on success, so a clean exit with no output is
+    /// a success.
     fn act(&self, args: &[String]) -> Result<(), HerdrError> {
-        self.call_owned(args).map(|_| ())
+        match self.call_owned(args) {
+            Ok(_) => Ok(()),
+            Err(HerdrError::Exec {
+                status: Some(0),
+                stderr,
+            }) if stderr.is_empty() => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     // Queries ------------------------------------------------------------
@@ -513,9 +523,13 @@ impl HerdrClient {
     // Actions ------------------------------------------------------------
 
     /// `herdr pane run <pane> <argv...>`: type a command and press Enter.
+    ///
+    /// The words are joined into one argument, as Herdr types them separated
+    /// by spaces anyway: a `--session` among them would otherwise be taken
+    /// for Herdr's own global option.
     pub fn pane_run(&self, pane: &str, argv: &[&str]) -> Result<(), HerdrError> {
         let mut args = strings(&["pane", "run", pane]);
-        push_positionals(&mut args, argv);
+        args.push(argv.join(" "));
         self.act(&args)
     }
 
@@ -534,11 +548,13 @@ impl HerdrClient {
         self.act(&args)
     }
 
-    /// `herdr pane report-agent ...`
+    /// `herdr pane report-agent <pane> ...` (every command takes its target first, see
+    /// [`HerdrClient::pane_report_metadata`])
     pub fn pane_report_agent(&self, report: &ReportAgent) -> Result<(), HerdrError> {
         let mut args = strings(&[
             "pane",
             "report-agent",
+            &report.pane,
             "--source",
             &report.source,
             "--agent",
@@ -557,7 +573,6 @@ impl HerdrClient {
             report.session_id.as_deref(),
             report.session_path.as_deref(),
         );
-        args.push(report.pane.clone());
         push_resume(&mut args, &report.resume);
         self.act(&args)
     }
@@ -567,6 +582,7 @@ impl HerdrClient {
         let mut args = strings(&[
             "pane",
             "report-agent-session",
+            &report.pane,
             "--source",
             &report.source,
             "--agent",
@@ -583,12 +599,11 @@ impl HerdrClient {
             args.push("--session-start-source".into());
             args.push(start.clone());
         }
-        args.push(report.pane.clone());
         push_resume(&mut args, &report.resume);
         self.act(&args)
     }
 
-    /// `herdr pane release-agent --source <source> --agent <agent> --seq <seq> <pane>`
+    /// `herdr pane release-agent <pane> --source <source> --agent <agent> --seq <seq>`
     pub fn pane_release_agent(
         &self,
         pane: &str,
@@ -600,18 +615,21 @@ impl HerdrClient {
         let args = strings(&[
             "pane",
             "release-agent",
+            pane,
             "--source",
             source,
             "--agent",
             agent,
             "--seq",
             &seq,
-            pane,
         ]);
         self.act(&args)
     }
 
-    /// `herdr pane report-metadata --source <source> (--token|--clear-token) ... --seq <seq> <pane>`
+    /// `herdr pane report-metadata <pane> --source <source> (--token|--clear-token) ... --seq <seq>`
+    ///
+    /// The target comes first: Herdr rejects the value of a leading option
+    /// ("unknown option") when the positional follows the options.
     pub fn pane_report_metadata(
         &self,
         pane: &str,
@@ -619,15 +637,14 @@ impl HerdrClient {
         change: &MetadataChange,
         seq: u64,
     ) -> Result<(), HerdrError> {
-        let mut args = strings(&["pane", "report-metadata", "--source", source]);
+        let mut args = strings(&["pane", "report-metadata", pane, "--source", source]);
         change.push_args(&mut args);
         args.push("--seq".into());
         args.push(seq.to_string());
-        args.push(pane.into());
         self.act(&args)
     }
 
-    /// `herdr workspace report-metadata --source <source> (--token|--clear-token) ... --seq <seq> <workspace>`
+    /// `herdr workspace report-metadata <workspace> --source <source> (--token|--clear-token) ... --seq <seq>`
     pub fn workspace_report_metadata(
         &self,
         workspace: &str,
@@ -635,11 +652,16 @@ impl HerdrClient {
         change: &MetadataChange,
         seq: u64,
     ) -> Result<(), HerdrError> {
-        let mut args = strings(&["workspace", "report-metadata", "--source", source]);
+        let mut args = strings(&[
+            "workspace",
+            "report-metadata",
+            workspace,
+            "--source",
+            source,
+        ]);
         change.push_args(&mut args);
         args.push("--seq".into());
         args.push(seq.to_string());
-        args.push(workspace.into());
         self.act(&args)
     }
 
@@ -667,10 +689,13 @@ impl HerdrClient {
         self.act(&strings(&["agent", "focus", pane]))
     }
 
-    /// `herdr notification show --body <body> <title>`
+    /// `herdr notification show <title> --body <body>` (the title comes first,
+    /// see [`HerdrClient::pane_report_metadata`]).
     pub fn notify(&self, title: &str, body: &str) -> Result<(), HerdrError> {
-        let mut args = strings(&["notification", "show", "--body", body]);
+        let mut args = strings(&["notification", "show"]);
         push_positionals(&mut args, &[title]);
+        args.push("--body".into());
+        args.push(body.into());
         self.act(&args)
     }
 }
@@ -679,12 +704,9 @@ fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|a| a.to_string()).collect()
 }
 
-/// Append free-form positionals, guarded by `--` when one of them could be
-/// mistaken for an option.
+/// Append free-form positionals. Herdr takes a dash-leading word as a
+/// positional and types a literal `--` it is given, so no separator is added.
 fn push_positionals(args: &mut Vec<String>, values: &[&str]) {
-    if values.iter().any(|v| v.starts_with('-')) {
-        args.push("--".into());
-    }
     args.extend(values.iter().map(|v| v.to_string()));
 }
 
@@ -1093,17 +1115,15 @@ mod tests {
     #[test]
     fn pane_run_argv() {
         let argv = argv_of(|c| c.pane_run("w1:p1", &["cargo", "test"]).unwrap());
-        assert_eq!(argv, v(&["pane", "run", "w1:p1", "cargo", "test"]));
-        // A command carrying option-like words is fenced off with `--`.
+        assert_eq!(argv, v(&["pane", "run", "w1:p1", "cargo test"]));
+        // One argument, so that `--session` is not read as a Herdr global option.
         let argv = argv_of(|c| {
             c.pane_run("w1:p1", &["exec", "/opt/ph", "--pane", "w1:p1"])
                 .unwrap()
         });
         assert_eq!(
             argv,
-            v(&[
-                "pane", "run", "w1:p1", "--", "exec", "/opt/ph", "--pane", "w1:p1"
-            ])
+            v(&["pane", "run", "w1:p1", "exec /opt/ph --pane w1:p1"])
         );
     }
 
@@ -1112,7 +1132,19 @@ mod tests {
         let argv = argv_of(|c| c.pane_send_text("w1:p1", "/exit").unwrap());
         assert_eq!(argv, v(&["pane", "send-text", "w1:p1", "/exit"]));
         let argv = argv_of(|c| c.pane_send_text("w1:p1", "-x").unwrap());
-        assert_eq!(argv, v(&["pane", "send-text", "w1:p1", "--", "-x"]));
+        assert_eq!(argv, v(&["pane", "send-text", "w1:p1", "-x"]));
+    }
+
+    #[test]
+    fn a_silent_success_is_a_success() {
+        // Herdr prints nothing for `pane send-text`, `pane run`, `report-*`.
+        let runner = RecordingRunner::with_stdout("");
+        let client = HerdrClient::with_runner("/opt/herdr", runner);
+        client.pane_send_text("w1:p1", "x").unwrap();
+        // A fetch still needs its JSON.
+        let runner = RecordingRunner::with_stdout("");
+        let client = HerdrClient::with_runner("/opt/herdr", runner);
+        assert!(client.agent_list().is_err());
     }
 
     #[test]
@@ -1140,6 +1172,7 @@ mod tests {
             v(&[
                 "pane",
                 "report-agent",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--agent",
@@ -1154,7 +1187,6 @@ mod tests {
                 "sid",
                 "--agent-session-path",
                 "/tmp/s.jsonl",
-                "w1:p1",
                 "--",
                 "herdr-sleep-ph",
                 "--pane",
@@ -1182,6 +1214,7 @@ mod tests {
             v(&[
                 "pane",
                 "report-agent",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--agent",
@@ -1190,7 +1223,6 @@ mod tests {
                 "working",
                 "--seq",
                 "0",
-                "w1:p1",
             ])
         );
     }
@@ -1213,6 +1245,7 @@ mod tests {
             v(&[
                 "pane",
                 "report-agent-session",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--agent",
@@ -1223,7 +1256,6 @@ mod tests {
                 "sid",
                 "--session-start-source",
                 "resume",
-                "w1:p1",
                 "--",
                 "claude",
                 "--resume",
@@ -1243,13 +1275,13 @@ mod tests {
             v(&[
                 "pane",
                 "release-agent",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--agent",
                 "sleeping-claude",
                 "--seq",
                 "9",
-                "w1:p1",
             ])
         );
     }
@@ -1266,13 +1298,13 @@ mod tests {
             v(&[
                 "pane",
                 "report-metadata",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--token",
                 "sleep=zz",
                 "--seq",
-                "4",
-                "w1:p1"
+                "4"
             ])
         );
         let clear = MetadataChange::clear_token("sleep");
@@ -1285,13 +1317,13 @@ mod tests {
             v(&[
                 "pane",
                 "report-metadata",
+                "w1:p1",
                 "--source",
                 "herdr-sleep",
                 "--clear-token",
                 "sleep",
                 "--seq",
-                "5",
-                "w1:p1"
+                "5"
             ])
         );
     }
@@ -1308,13 +1340,13 @@ mod tests {
             v(&[
                 "workspace",
                 "report-metadata",
+                "w1",
                 "--source",
                 "herdr-sleep",
                 "--token",
                 "sleep=zz",
                 "--seq",
-                "1",
-                "w1"
+                "1"
             ])
         );
         let clear = MetadataChange::clear_token("sleep");
@@ -1327,13 +1359,13 @@ mod tests {
             v(&[
                 "workspace",
                 "report-metadata",
+                "w1",
                 "--source",
                 "herdr-sleep",
                 "--clear-token",
                 "sleep",
                 "--seq",
-                "2",
-                "w1"
+                "2"
             ])
         );
     }
@@ -1365,14 +1397,14 @@ mod tests {
             v(&[
                 "notification",
                 "show",
+                "Herdr Sleep",
                 "--body",
-                "claude is asleep",
-                "Herdr Sleep"
+                "claude is asleep"
             ])
         );
         assert_eq!(
             argv_of(|c| c.notify("-title", "b").unwrap()),
-            v(&["notification", "show", "--body", "b", "--", "-title"])
+            v(&["notification", "show", "-title", "--body", "b"])
         );
     }
 }

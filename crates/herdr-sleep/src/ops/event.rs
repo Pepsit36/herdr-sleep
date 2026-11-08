@@ -282,6 +282,9 @@ pub fn handle_focus_event(env: &dyn Env, config: &Config, event: &FocusEvent) ->
     let mut lookup_failed = None;
     let awake = wait_until(env, AWAKE_TIMEOUT, AWAKE_POLL, |_| match env.agent(&pane) {
         Ok(agent) => !agent.is_sleeping(),
+        // Between the Placeholder's release and Herdr recognising the woken
+        // agent the pane hosts no agent at all: keep waiting.
+        Err(error) if error.contains("agent_not_found") => false,
         Err(error) => {
             lookup_failed = Some(error);
             true
