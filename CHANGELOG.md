@@ -36,3 +36,11 @@ a published entry is frozen, typo included.
 - **Sidebar markers:** a sleeping pane or a fully sleeping space shows a `$sleep` sidebar token (name and icon configurable), and a fully sleeping tab gets the icon as a label prefix (`tab_prefix`, on by default).
 - **Commands:** `herdr-sleep status` lists every managed agent with its idle time, memory and last refusal, and the watcher state; `herdr-sleep config` prints the effective configuration; `status`, `sweep`, `sleep`, `wake`, `config` and `ensure-watcher` accept `--json`, and `sleep` and `wake` act on the pane of the Herdr action when no target is given.
 - **Restart:** sleeping panes are restored after a Herdr restart: the plugin puts the Placeholder back in every pane that was asleep, without starting any agent. Set `[session] resume_agents_on_restore = false` in Herdr's config so that Herdr does not relaunch every agent at once.
+
+### Fixed
+
+- **Sleep:** a Claude Code agent whose conversation has not been saved yet (for instance before
+  its first message) is no longer put to sleep, because it could not be resumed. `status` shows
+  `no-conversation` and the agent is retried later.
+- **Wake:** when the resume command fails right after waking, the pane now says what happened and
+  which command was tried before leaving you in your shell, instead of dropping to a bare prompt.
