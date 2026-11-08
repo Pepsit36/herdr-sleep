@@ -243,16 +243,16 @@ fn declares_shows_replays_and_hands_over() {
     h.type_bytes(b"hello\r");
     let shell = h.shell_record();
     assert_eq!(shell[0], format!("PWD={}", h.dir.display()));
-    assert_eq!(
-        &shell[1..],
-        [
-            "ARG=-i".to_string(),
-            "ARG=-c".to_string(),
-            format!(
-                "ARG=claude --resume sess-1; exec {} -l",
-                h.path("shell").display()
-            ),
-        ]
+    assert_eq!(&shell[1..3], ["ARG=-i".to_string(), "ARG=-c".to_string()]);
+    assert_eq!(shell.len(), 4);
+    let script = &shell[3];
+    assert!(
+        script.starts_with("ARG=claude --resume sess-1; sh -c '"),
+        "{script}"
+    );
+    assert!(
+        script.ends_with(&format!("; exec {} -l", h.path("shell").display())),
+        "{script}"
     );
 
     let replay = h.path("state/replay-1-2.txt");

@@ -23,10 +23,42 @@ pub fn shell_quote(word: &str) -> String {
     }
 }
 
-/// The script the shell runs: the resume command, then a login shell.
+/// Seconds after the shell started within which a failing resume command is
+/// reported: it did not get to run, as opposed to an agent the user quit.
+const QUICK_FAILURE_SECS: u32 = 10;
+
+/// POSIX `sh` helper run after the resume command with its exit status and
+/// the command line. It reads how long its parent shell has been alive
+/// (`ps` elapsed time, `[[dd-]hh:]mm:ss`) and, for a quick failure, says what
+/// happened so the pane is not silently left at a bare shell.
+fn failure_report() -> String {
+    format!(
+        concat!(
+            "[ \"$1\" = 0 ] && exit 0; ",
+            "t=$(ps -o etime= -p \"$PPID\" 2>/dev/null | tr -d \" \"); ",
+            "case \"$t\" in ",
+            "\"\"|00:0?) ;; ",
+            "00:[0-9]*) [ \"${{t#00:}}\" -lt {limit} ] || exit 0 ;; ",
+            "*) exit 0 ;; esac; ",
+            "printf \"\\nherdr-sleep: the agent could not be resumed (exit status %s).\\n\" \"$1\"; ",
+            "printf \"herdr-sleep: command tried: %s\\n\" \"$2\"; ",
+            "printf \"herdr-sleep: the session may have no saved conversation. This is a plain shell.\\n\\n\""
+        ),
+        limit = QUICK_FAILURE_SECS
+    )
+}
+
+/// The script the shell runs: the resume command, a report when it failed at
+/// once, then a login shell.
 pub fn wake_script(resume: &[String], shell: &str) -> String {
     let command: Vec<String> = resume.iter().map(|w| shell_quote(w)).collect();
-    format!("{}; exec {} -l", command.join(" "), shell_quote(shell))
+    let command = command.join(" ");
+    format!(
+        "{command}; sh -c {} sh $? {}; exec {} -l",
+        shell_quote(&failure_report()),
+        shell_quote(&command),
+        shell_quote(shell)
+    )
 }
 
 /// Keeps `[A-Za-z0-9_-]`, replaces anything else with `_`.
@@ -157,12 +189,39 @@ mod tests {
     }
 
     #[test]
-    fn script_resumes_then_falls_back_to_a_login_shell() {
+    fn script_resumes_reports_a_failure_then_falls_back_to_a_login_shell() {
         let resume = vec!["claude".to_string(), "--resume".into(), "s 1".into()];
-        assert_eq!(
-            wake_script(&resume, "/bin/zsh"),
-            "claude --resume 's 1'; exec /bin/zsh -l"
+        let script = wake_script(&resume, "/bin/zsh");
+        assert!(script.starts_with("claude --resume 's 1'; sh -c '"));
+        assert!(script.ends_with("; exec /bin/zsh -l"));
+    }
+
+    fn run_script(resume: &[&str]) -> String {
+        let resume: Vec<String> = resume.iter().map(|w| w.to_string()).collect();
+        let out = Command::new("sh")
+            .args(["-c", &wake_script(&resume, "/bin/echo")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn a_quick_failure_is_explained_and_the_shell_still_starts() {
+        let stdout = run_script(&["sh", "-c", "exit 3"]);
+        assert!(
+            stdout.contains("could not be resumed (exit status 3)"),
+            "{stdout}"
         );
+        assert!(stdout.contains("command tried: sh -c 'exit 3'"), "{stdout}");
+        assert!(
+            stdout.ends_with("-l\n"),
+            "the shell is still exec'd: {stdout}"
+        );
+    }
+
+    #[test]
+    fn a_successful_resume_prints_nothing() {
+        assert_eq!(run_script(&["true"]), "-l\n");
     }
 
     #[test]

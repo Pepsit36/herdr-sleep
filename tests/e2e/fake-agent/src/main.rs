@@ -121,6 +121,20 @@ fn session_id() -> String {
         .unwrap_or_else(|_| "00000000-0000-0000-0000-000000000000".to_string())
 }
 
+/// Saves the transcript a real Claude Code keeps, so that the session can be resumed.
+fn save_conversation(sid: &str) {
+    let config = std::env::var("CLAUDE_CONFIG_DIR").ok().or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| format!("{home}/.claude"))
+    });
+    if let Some(config) = config {
+        let dir = format!("{config}/projects/e2e");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(format!("{dir}/{sid}.jsonl"), "{}\n");
+    }
+}
+
 fn rule() -> String {
     "\u{2500}".repeat(RULE_WIDTH)
 }
@@ -146,6 +160,7 @@ fn leave_box(out: &mut impl Write) {
 fn main() {
     let mut reporter = Reporter::from_env();
     let sid = session_id();
+    save_conversation(&sid);
     reporter.report_idle(&sid);
     reporter.report_session(&sid);
 
