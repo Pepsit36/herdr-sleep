@@ -6,6 +6,22 @@ BINARIES = herdr-sleep herdr-sleep-ph
 VERSION = $(shell sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' herdr-plugin.toml | head -n 1)
 OS = $(shell uname -s | sed -e 's/Linux/linux/' -e 's/Darwin/macos/')
 ARCH = $(shell uname -m | sed -e 's/arm64/aarch64/' -e 's/amd64/x86_64/')
+# TARGET=<triple> packages a cross build from target/<triple>/release; the triple names the
+# archive's OS and architecture. VERSION=<x.y.z> overrides the manifest's version (canary builds).
+TARGET ?=
+RELEASE_DIR = target/release
+ifneq ($(TARGET),)
+RELEASE_DIR = target/$(TARGET)/release
+ARCH = $(firstword $(subst -, ,$(TARGET)))
+ifneq ($(findstring apple-darwin,$(TARGET)),)
+OS = macos
+else ifneq ($(findstring unknown-linux,$(TARGET)),)
+OS = linux
+else
+$(error TARGET must be a Linux or macOS triple, got $(TARGET))
+endif
+endif
+ARCHIVE = herdr-sleep-$(VERSION)-$(OS)-$(ARCH).tar.gz
 HERDR_VERSIONS ?= 0.9.2 latest
 
 .PHONY: help build test check fmt clippy changelog e2e e2e-one link unlink dist clean
@@ -54,10 +70,10 @@ link: ## Build, install the binaries into bin/ and link this checkout into Herdr
 unlink: ## Unlink the plugin from Herdr
 	herdr plugin unlink $(PLUGIN_ID)
 
-dist: ## Archive target/release into dist/herdr-sleep-<version>-<os>-<arch>.tar.gz (+ .sha256)
+dist: ## Archive the release binaries into dist/herdr-sleep-<version>-<os>-<arch>.tar.gz (+ .sha256); TARGET=<triple> VERSION=<x.y.z>
 	mkdir -p dist
-	tar -czf dist/herdr-sleep-$(VERSION)-$(OS)-$(ARCH).tar.gz -C target/release $(BINARIES)
-	cd dist && { sha256sum herdr-sleep-$(VERSION)-$(OS)-$(ARCH).tar.gz 2>/dev/null || shasum -a 256 herdr-sleep-$(VERSION)-$(OS)-$(ARCH).tar.gz; } > herdr-sleep-$(VERSION)-$(OS)-$(ARCH).tar.gz.sha256
+	tar -czf dist/$(ARCHIVE) -C $(RELEASE_DIR) $(BINARIES)
+	cd dist && { sha256sum $(ARCHIVE) 2>/dev/null || shasum -a 256 $(ARCHIVE); } > $(ARCHIVE).sha256
 
 clean: ## Remove build artifacts
 	$(CARGO) clean

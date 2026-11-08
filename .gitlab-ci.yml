@@ -1,6 +1,17 @@
 stages:
   - test
   - e2e
+  - prepare
+  - build
+  - release
+
+# The release commit's tag must not start a pipeline of its own: the commit it
+# marks already went through one (and the commit itself carries `[skip ci]`).
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - when: always
 
 # Every Rust job shares this. The slim image ships neither rustfmt nor clippy,
 # so the jobs that need them add the component first; the cargo home sits
@@ -98,3 +109,179 @@ e2e:
     - docker info
   script:
     - make e2e-one HERDR_VERSION=$HERDR_VERSION
+
+# ---------------------------------------------------------------------------
+# Release pipeline (ADR 0006 and 0007). Only `main` publishes. The steps are
+# `cargo xtask release ...` commands and the small shell files of scripts/ci,
+# all of them tested offline; the jobs below only call them.
+#
+# What the maintainer must configure before the first release:
+#   - CI/CD variables GITLAB_TOKEN (project access token, Maintainer, scopes api
+#     and write_repository) and GITHUB_TOKEN (fine-grained token, Contents
+#     read and write on the GitHub repository), both masked and protected;
+#   - `main` allows the token's bot user to push (it pushes one commit and one tag);
+#   - the `release` resource group processes jobs oldest first
+#     (Settings > CI/CD > Resource group, or the API `process_mode`);
+#   - the GitLab push mirror to GitHub is running (tags must reach GitHub).
+# Until the tokens exist the `release` job fails first, naming the missing one.
+# ---------------------------------------------------------------------------
+
+.release-main:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# Decides the release and writes its version into the manifests, so that the
+# binaries built next report their real version. RELEASE=0 means nothing
+# publishes: the jobs after this one then end successfully without working.
+release:prepare:
+  extends: [.rust, .release-main]
+  stage: prepare
+  cache: []
+  resource_group: release
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git >/dev/null
+    - rustc --version && cargo --version
+  script:
+    - git fetch --tags origin
+    - |
+      status=0
+      cargo xtask release prepare --apply > release.env || status=$?
+      cat release.env
+      if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
+  artifacts:
+    reports:
+      dotenv: release.env
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - herdr-plugin.toml
+    expire_in: 1 week
+
+# Cross compilation from one Linux image: Zig is the linker for the four targets,
+# so no Apple SDK is needed (the binaries only use libc). Versions are pinned.
+.cross:
+  image: rust:1.98-bookworm
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo-home
+    CARGO_TERM_COLOR: always
+    PIP_BREAK_SYSTEM_PACKAGES: "1"
+    ZIGLANG_VERSION: "0.13.0"
+    CARGO_ZIGBUILD_VERSION: "0.24.1"
+  # Per branch, so a build from a feature branch (canary) can never fill a cache
+  # that the release build on main restores. Cargo also checks every crate
+  # against the checksums in Cargo.lock.
+  cache:
+    key: cross-$CI_COMMIT_REF_SLUG-$TARGET
+    paths:
+      - .cargo-home/registry/
+  parallel:
+    matrix:
+      - TARGET:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3-pip file >/dev/null
+    - pip install --quiet "ziglang==$ZIGLANG_VERSION" "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION"
+    - rustup target add "$TARGET"
+    - rustc --version && cargo --version
+
+build:release:
+  # What ships to users is built without any restored cache.
+  cache: []
+  extends: [.cross, .release-main]
+  stage: build
+  needs:
+    - job: release:prepare
+      artifacts: true
+  script:
+    - |
+      if [ "${RELEASE:-0}" != 1 ]; then echo "Nothing to release."; exit 0; fi
+      cargo zigbuild --release --locked --target "$TARGET" -p herdr-sleep -p herdr-sleep-ph
+      sh scripts/ci/smoke.sh "$TARGET" "$VERSION"
+      make dist TARGET="$TARGET" VERSION="$VERSION"
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+# Commits, tags and publishes, only after every build succeeded. Idempotent: a
+# retry completes whatever an earlier attempt left undone.
+release:
+  extends: [.rust, .release-main]
+  stage: release
+  cache: []
+  resource_group: release
+  variables:
+    GIT_DEPTH: "0"
+  needs:
+    - job: release:prepare
+      artifacts: true
+    - job: build:release
+      artifacts: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git >/dev/null
+    - rustc --version && cargo --version
+  script:
+    - |
+      if [ "${RELEASE:-0}" != 1 ]; then echo "Nothing to release."; exit 0; fi
+      # Tokens first: nothing changes anywhere before they are known to exist.
+      sh scripts/ci/require-env.sh GITLAB_TOKEN GITHUB_TOKEN
+      archives=$(ls dist/herdr-sleep-"$VERSION"-*.tar.gz | wc -l)
+      if [ "$archives" -ne 4 ]; then echo "Expected 4 archives for $VERSION, found $archives." >&2; exit 1; fi
+      git config user.name "Herdr Sleep release"
+      git config user.email "release@$CI_SERVER_HOST"
+      git remote set-url origin "https://release:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+      git fetch --tags origin
+      cargo xtask release commit
+      cargo xtask release publish-github
+      cargo xtask release notes --version "$VERSION" > notes.md
+      sh scripts/ci/gitlab-release.sh notes.md dist
+
+# A prerelease of a branch, built on demand and published as a GitLab generic
+# package: never a tag, never a release, never on GitHub. Play the four
+# `canary:build` jobs, then `canary:publish`.
+.canary:
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"'
+      when: manual
+      allow_failure: true
+
+canary:build:
+  extends: [.cross, .canary]
+  stage: build
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - |
+      git fetch origin "+refs/heads/main:refs/remotes/origin/main"
+      git fetch --tags origin
+      VERSION=$(cargo xtask canary-version "$CI_COMMIT_SHORT_SHA")
+      cargo xtask release set-version "$VERSION"
+      cargo zigbuild --release --locked --target "$TARGET" -p herdr-sleep -p herdr-sleep-ph
+      sh scripts/ci/smoke.sh "$TARGET" "$VERSION"
+      make dist TARGET="$TARGET" VERSION="$VERSION"
+      echo "$VERSION" > dist/VERSION
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+canary:publish:
+  extends: .canary
+  stage: release
+  image: rust:1.98-slim-bookworm
+  needs:
+    - job: canary:build
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "merge_request_event"'
+      when: manual
+      allow_failure: true
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl >/dev/null
+  script:
+    - VERSION=$(cat dist/VERSION) sh scripts/ci/canary-upload.sh dist

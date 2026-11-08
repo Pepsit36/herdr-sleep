@@ -8,6 +8,7 @@ mod date;
 mod entries;
 mod git;
 mod plan;
+mod release;
 mod version;
 
 use std::process::ExitCode;
@@ -21,6 +22,8 @@ Commands:
   changelog <subcommand>      Versions and CHANGELOG.md: version, stamp, check,
                               coverage, unreleased (`changelog --help` for details)
   canary-version SHORT_SHA    Print the prerelease version of a canary build
+  release <subcommand>        The release steps: prepare, set-version, notes, commit,
+                              publish-github (`release --help` for details)
   release-backlog             Fail while main stamps a version that has no tag
 
 Options:
@@ -49,6 +52,7 @@ fn dispatch(args: &[String]) -> Outcome {
             Ok(0)
         }
         "canary-version" => commands::canary::run(rest),
+        "release" => release::run(rest),
         "release-backlog" if cli::wants_help(rest) => {
             print!("{}", commands::backlog::USAGE);
             Ok(0)
@@ -67,6 +71,7 @@ fn main() -> ExitCode {
             let usage = match args.first().map(String::as_str) {
                 Some("changelog") => commands::CHANGELOG_USAGE,
                 Some("canary-version") => commands::canary::USAGE,
+                Some("release") => release::USAGE,
                 Some("release-backlog") => commands::backlog::USAGE,
                 _ => USAGE,
             };
