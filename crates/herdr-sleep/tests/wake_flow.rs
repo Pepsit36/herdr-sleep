@@ -75,6 +75,7 @@ case "$1 $2" in
     elif [ -e "$D/enter" ]; then touch "$D/awake"; cat "$D/agent-sleeping.json"
     elif [ -e "$D/always-awake" ]; then cat "$D/agent-awake.json"
     else cat "$D/agent-sleeping.json"; fi ;;
+  "api snapshot") echo '{{"id":"x","result":{{"snapshot":{{}}}}}}' ;;
   "pane read") printf 'output\n\342\235\257 \n' ;;
   "pane send-keys") touch "$D/enter"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
   *) echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;

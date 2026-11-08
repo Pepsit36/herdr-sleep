@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::config::{self, Config};
 use crate::herdr::HerdrClient;
 use crate::journal::Journal;
-use crate::ops::{Env, LiveEnv, SweepState, sweep_once};
+use crate::ops::{Env, LiveEnv, SweepState, resync_markers, sweep_once};
 
 /// Name of the lock file inside the state directory.
 pub const LOCK_FILE: &str = "watcher.lock";
@@ -392,6 +392,10 @@ pub fn watch() -> WatchEnd {
     journal.log("WATCH-START", &pid.to_string());
     let client = HerdrClient::from_env();
     let env = LiveEnv::new(client.clone()).with_state_dir(&state_dir);
+    // Herdr does not keep metadata tokens across a restart.
+    if let Ok(config) = Config::load() {
+        resync_markers(&env, &config);
+    }
     let host = LiveHost::new(socket, client);
     let reason = run_loop(&host, &env, &lock_path(&state_dir), &|| {
         Config::load().map_err(|e| e.to_string())
@@ -490,6 +494,18 @@ mod tests {
         }
         fn notify(&self, _: &str, _: &str) -> EnvResult<()> {
             unreachable!()
+        }
+        fn tab_rename(&self, _: &str, _: &str) -> EnvResult<()> {
+            Ok(())
+        }
+        fn workspace_report_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &crate::herdr::MetadataChange,
+            _: u64,
+        ) -> EnvResult<()> {
+            Ok(())
         }
         fn check_guards(&self, _: &Config, _: &Agent, _: SleepMode) -> Result<(), Refusal> {
             Ok(())

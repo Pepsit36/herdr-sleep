@@ -91,6 +91,7 @@ case "$1 $2" in
     if [ -e "$D/quit" ]; then cat "$D/pane-get-quit.json"; else cat "$D/pane-get-current.json"; fi ;;
   "pane process-info")
     if [ -e "$D/quit" ]; then cat "$D/process-info-quit.json"; else cat "$D/process-info-current.json"; fi ;;
+  "api snapshot") echo '{{"id":"x","result":{{"snapshot":{{}}}}}}' ;;
   "pane read") printf 'first\n\nlast preview line  \n\n' ;;
   "pane send-keys") touch "$D/quit"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
   "pane run") touch "$D/exec"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;

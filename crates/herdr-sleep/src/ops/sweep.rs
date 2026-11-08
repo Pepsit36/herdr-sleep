@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::guards::SleepMode;
 use crate::journal::Journal;
 
-use super::{Env, SleepOutcome, sleep_agent};
+use super::{Env, SleepOutcome, sleep_agent, sync_markers};
 
 /// Most agents put to sleep in one pass. A sleep takes seconds, so the rest
 /// waits for the next pass instead of freezing the Watcher.
@@ -188,6 +188,10 @@ pub fn sweep_with_mode(
     {
         Journal::new(&dir).log("WARN", &format!("cannot save {STATE_FILE}: {error}"));
     }
+    // One synchronisation per pass heals a marker the per-sleep ones missed.
+    if !report.slept.is_empty() {
+        sync_markers(env, config);
+    }
     report
 }
 
@@ -314,6 +318,18 @@ mod tests {
         }
         fn notify(&self, _: &str, _: &str) -> EnvResult<()> {
             unreachable!()
+        }
+        fn tab_rename(&self, _: &str, _: &str) -> EnvResult<()> {
+            Ok(())
+        }
+        fn workspace_report_metadata(
+            &self,
+            _: &str,
+            _: &str,
+            _: &crate::herdr::MetadataChange,
+            _: u64,
+        ) -> EnvResult<()> {
+            Ok(())
         }
         fn check_guards(&self, _: &Config, agent: &Agent, _: SleepMode) -> Result<(), Refusal> {
             match self.refusals.borrow().get(&agent.pane_id) {
