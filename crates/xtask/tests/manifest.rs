@@ -221,9 +221,20 @@ impl Sandbox {
         for dir in [repo.join("scripts"), tools.clone(), releases.clone()] {
             fs::create_dir_all(dir).unwrap();
         }
+        // The manifest carries the version of the last release: pin the one under test.
         let manifest = fs::read_to_string(repo_root().join("herdr-plugin.toml"))
             .unwrap()
-            .replace("version = \"0.0.0\"", &format!("version = \"{version}\""));
+            .lines()
+            .map(|line| {
+                if line.starts_with("version = \"") {
+                    format!("version = \"{version}\"")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let manifest = format!("{manifest}\n");
         fs::write(repo.join("herdr-plugin.toml"), manifest).unwrap();
         fs::copy(
             repo_root().join("scripts/build.sh"),
