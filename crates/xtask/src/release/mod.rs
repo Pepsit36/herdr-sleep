@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::cli::{Failure, Outcome, error, usage, wants_help};
-use crate::git;
+use crate::git::{self, Tags};
+use crate::version::Version;
 
 pub const USAGE: &str = "\
 Usage: cargo xtask release [--dry-run] <subcommand> [options]
@@ -23,7 +24,9 @@ Subcommands, in the order the pipeline runs them:
       Decide the release. Print `RELEASE=1` and `VERSION=X.Y.Z` (or `RELEASE=0`
       and exit 3 when nothing publishes). Refuses when CHANGELOG.md does not
       carry the computed version on top, or when its tag exists on a commit that
-      is not this one's release commit. With --apply, write the version into
+      is not this one's release commit. When HEAD is itself the tagged release
+      commit of the last release, print the same lines (resume): the release is
+      finished, not redone. With --apply, write the version into
       Cargo.toml, herdr-plugin.toml and Cargo.lock.
   set-version X.Y.Z
       Write a version, prerelease allowed, into the same three files (canary builds).
@@ -32,7 +35,8 @@ Subcommands, in the order the pipeline runs them:
   commit [--remote NAME] [--branch NAME]
       Commit the three files as `chore(release): X.Y.Z [skip ci]`, tag it `vX.Y.Z`,
       push the branch and then the tag. Reuses a release commit, tag or pushed
-      branch left by an earlier attempt instead of failing.
+      branch left by an earlier attempt instead of failing. Does nothing, and
+      succeeds, when HEAD is already the tagged release commit.
   publish-github [--dist DIR] [--version X.Y.Z] [--wait-seconds N] [--poll-seconds N]
       With GITHUB_TOKEN: wait for the tag on GitHub, create the release when it is
       missing, upload every archive and checksum of DIR that is not attached yet,
@@ -77,6 +81,20 @@ pub(crate) fn manifest_version() -> Result<String, Failure> {
             Some(inner.to_string())
         })
         .ok_or_else(|| error(format!("{} carries no version", rewrite::MANIFEST)))
+}
+
+/// The version whose release commit is HEAD itself, tag included: a release
+/// that stopped after its tag was created and may be finished again.
+pub(crate) fn finished_at_head(tags: &Tags) -> Option<Version> {
+    let version = tags.highest_reachable()?;
+    let head = git::rev_parse("HEAD")?;
+    if git::rev_parse(&format!("{}^{{commit}}", version.tag()))? != head {
+        return None;
+    }
+    let subject = git::run(&["log", "-1", "--format=%s", "HEAD"])?;
+    let prefix = format!("chore(release): {version}");
+    let rest = subject.trim().strip_prefix(&prefix)?;
+    (rest.is_empty() || rest.starts_with(' ')).then_some(version)
 }
 
 /// Runs `program` and returns its standard output, or its failure explained.

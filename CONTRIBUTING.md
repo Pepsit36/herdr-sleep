@@ -45,6 +45,11 @@ your Herdr, it runs everything in containers.
 Versions are computed from the commits, never edited by hand (ADR 0007). No em dash anywhere, and
 code, comments and docs are in English.
 
+A release that stopped after its tag (for example at `publish-github`) is finished from `main`:
+create a pipeline on it (`POST /projects/:id/pipeline?ref=main`, or Run pipeline in the UI).
+Because HEAD is the tagged release commit, `release prepare` resumes it and `release commit` does
+nothing, so the build jobs run again and `release` only completes the missing publication.
+
 ## Reporting a problem
 
 Include the output of `herdr-sleep status`, the relevant lines of the journal (`herdr-sleep.log` in
