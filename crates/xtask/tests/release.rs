@@ -133,6 +133,7 @@ impl Repo {
         command
             .args(args)
             .current_dir(&self.work)
+            .env_remove("RESUME_RELEASE")
             .env_remove("GITHUB_TOKEN")
             .env_remove("GITHUB_REPOSITORY")
             .env_remove("GITHUB_API_URL")
@@ -355,36 +356,66 @@ fn commit_rerun_after_a_complete_release_changes_nothing() {
     assert_eq!(commit_count(&repo), count);
 }
 
-/// A finished release whose publication stopped: commit and tag exist, HEAD is on it.
+/// A finished release whose publication stopped: commit and tag exist, and
+/// `main` moved on with a merge commit on top, as after a merged request.
 fn released(repo: &Repo) {
     repo.prepare_applied();
     release_commit(repo);
+    git(&repo.work, &["checkout", "-q", "-b", "topic", "HEAD~1"]);
+    repo.write("topic.txt", "x\n");
+    repo.commit("chore: topic");
+    git(&repo.work, &["checkout", "-q", "main"]);
+    git(
+        &repo.work,
+        &["merge", "-q", "--no-ff", "-m", "Merge topic", "topic"],
+    );
 }
 
+const RESUME: &[(&str, &str)] = &[("RESUME_RELEASE", "1")];
+
 #[test]
-fn prepare_resumes_at_the_release_commit() {
+fn prepare_resumes_a_release_when_asked() {
     let repo = Repo::new();
     released(&repo);
-    let run = repo.xtask(&["release", "prepare", "--apply"]);
+    let run = repo.xtask_env(&["release", "prepare", "--apply"], RESUME);
     assert_eq!(run.code, 0, "{}", run.err);
     assert_eq!(run.out, "RELEASE=1\nVERSION=0.1.0\n");
-    assert!(run.err.contains("resuming"), "{}", run.err);
+    assert!(run.err.contains("resuming v0.1.0"), "{}", run.err);
     assert_eq!(git(&repo.work, &["status", "--porcelain"]), "");
 }
 
 #[test]
-fn prepare_does_not_resume_after_a_chore_on_top_of_the_release() {
+fn prepare_has_nothing_to_release_after_a_release_without_the_variable() {
     let repo = Repo::new();
     released(&repo);
-    repo.write("note.txt", "x\n");
-    repo.commit("chore: tidy");
-    let run = repo.xtask(&["release", "prepare"]);
+    let run = repo.xtask(&["release", "prepare", "--apply"]);
     assert_eq!(run.code, 3, "{}", run.err);
     assert_eq!(run.out, "RELEASE=0\n");
 }
 
 #[test]
-fn prepare_releases_normally_when_a_publishable_commit_follows() {
+fn prepare_refuses_to_resume_when_a_publishable_commit_follows() {
+    let repo = Repo::new();
+    released(&repo);
+    repo.write("fix.txt", "x\n");
+    repo.commit("fix(thing): repair a thing");
+    let run = repo.xtask_env(&["release", "prepare"], RESUME);
+    assert_eq!(run.code, 1, "{}", run.out);
+    assert!(run.err.contains("publish a new version"), "{}", run.err);
+    assert_eq!(run.out, "");
+}
+
+#[test]
+fn prepare_refuses_to_resume_a_tag_that_is_not_a_release_commit() {
+    let repo = Repo::new();
+    git(&repo.work, &["tag", "v0.1.0"]);
+    let run = repo.xtask_env(&["release", "prepare"], RESUME);
+    assert_eq!(run.code, 1, "{}", run.out);
+    assert!(run.err.contains("RESUME_RELEASE=1"), "{}", run.err);
+}
+
+#[test]
+fn prepare_releases_normally_when_a_publishable_commit_follows_without_the_variable() {
     let repo = Repo::new();
     released(&repo);
     repo.write("fix.txt", "x\n");
@@ -396,13 +427,11 @@ fn prepare_releases_normally_when_a_publishable_commit_follows() {
 }
 
 #[test]
-fn commit_is_a_no_op_at_the_release_commit() {
+fn commit_is_a_no_op_when_resuming() {
     let repo = Repo::new();
     released(&repo);
-    let (head, count) = (repo.head(), commit_count(&repo));
-    // Origin moved on: the out-of-order refusal must not apply.
-    git(&repo.work, &["checkout", "-q", "--detach", "HEAD"]);
-    let run = repo.xtask(&["release", "commit"]);
+    let (head, count, tag) = (repo.head(), commit_count(&repo), remote_tag(&repo));
+    let run = repo.xtask_env(&["release", "commit"], RESUME);
     assert_eq!(run.code, 0, "{}", run.err);
     assert!(
         run.out.contains("already committed and tagged"),
@@ -411,23 +440,7 @@ fn commit_is_a_no_op_at_the_release_commit() {
     );
     assert_eq!(repo.head(), head);
     assert_eq!(commit_count(&repo), count);
-    assert_eq!(remote_tag(&repo), head);
-}
-
-#[test]
-fn commit_is_a_no_op_even_when_origin_moved_on() {
-    let repo = Repo::new();
-    released(&repo);
-    let head = repo.head();
-    git(&repo.work, &["checkout", "-q", "-b", "other", "HEAD~1"]);
-    repo.write("later.txt", "x\n");
-    repo.commit("chore: later");
-    git(&repo.work, &["push", "-q", "-f", "origin", "other:main"]);
-    git(&repo.work, &["checkout", "-q", "main"]);
-    let run = repo.xtask(&["release", "commit"]);
-    assert_eq!(run.code, 0, "{}", run.err);
-    assert_eq!(repo.head(), head);
-    assert_ne!(repo.origin(&["rev-parse", "main"]), head);
+    assert_eq!(remote_tag(&repo), tag);
 }
 
 #[test]

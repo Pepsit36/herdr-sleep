@@ -14,6 +14,7 @@ use std::process::{Command, Stdio};
 
 use crate::cli::{Failure, Outcome, error, usage, wants_help};
 use crate::git::{self, Tags};
+use crate::plan;
 use crate::version::Version;
 
 pub const USAGE: &str = "\
@@ -24,9 +25,9 @@ Subcommands, in the order the pipeline runs them:
       Decide the release. Print `RELEASE=1` and `VERSION=X.Y.Z` (or `RELEASE=0`
       and exit 3 when nothing publishes). Refuses when CHANGELOG.md does not
       carry the computed version on top, or when its tag exists on a commit that
-      is not this one's release commit. When HEAD is itself the tagged release
-      commit of the last release, print the same lines (resume): the release is
-      finished, not redone. With --apply, write the version into
+      is not this one's release commit. With RESUME_RELEASE=1, resume the last
+      release (its commit and tag exist, nothing publishable follows): print the
+      same lines, change nothing. With --apply, write the version into
       Cargo.toml, herdr-plugin.toml and Cargo.lock.
   set-version X.Y.Z
       Write a version, prerelease allowed, into the same three files (canary builds).
@@ -36,7 +37,7 @@ Subcommands, in the order the pipeline runs them:
       Commit the three files as `chore(release): X.Y.Z [skip ci]`, tag it `vX.Y.Z`,
       push the branch and then the tag. Reuses a release commit, tag or pushed
       branch left by an earlier attempt instead of failing. Does nothing, and
-      succeeds, when HEAD is already the tagged release commit.
+      succeeds, with RESUME_RELEASE=1 (see prepare).
   publish-github [--dist DIR] [--version X.Y.Z] [--wait-seconds N] [--poll-seconds N]
       With GITHUB_TOKEN: wait for the tag on GitHub, create the release when it is
       missing, upload every archive and checksum of DIR that is not attached yet,
@@ -83,18 +84,50 @@ pub(crate) fn manifest_version() -> Result<String, Failure> {
         .ok_or_else(|| error(format!("{} carries no version", rewrite::MANIFEST)))
 }
 
-/// The version whose release commit is HEAD itself, tag included: a release
-/// that stopped after its tag was created and may be finished again.
-pub(crate) fn finished_at_head(tags: &Tags) -> Option<Version> {
-    let version = tags.highest_reachable()?;
-    let head = git::rev_parse("HEAD")?;
-    if git::rev_parse(&format!("{}^{{commit}}", version.tag()))? != head {
-        return None;
+/// The CI variable that asks to finish a release which stopped after its tag.
+pub(crate) const RESUME_VARIABLE: &str = "RESUME_RELEASE";
+
+/// With `RESUME_RELEASE=1`: the version of the last release, whose commit and
+/// tag already exist, so that its publication can be finished. Without the
+/// variable, `None`. Refuses when the last tag is not on a `chore(release)`
+/// commit of this history, when the manifests do not carry its version, or
+/// when a commit after it publishes something (that is a new release).
+pub(crate) fn resume_version(tags: &Tags) -> Result<Option<Version>, Failure> {
+    if std::env::var(RESUME_VARIABLE).as_deref() != Ok("1") {
+        return Ok(None);
     }
-    let subject = git::run(&["log", "-1", "--format=%s", "HEAD"])?;
+    let fail = |why: String| error(format!("release: {RESUME_VARIABLE}=1 but {why}"));
+    let version = tags
+        .highest_reachable()
+        .ok_or_else(|| fail("no release tag is reachable from HEAD.".to_string()))?;
+    let tag = version.tag();
+    let commit = git::rev_parse(&format!("{tag}^{{commit}}"))
+        .ok_or_else(|| fail(format!("tag {tag} does not exist.")))?;
+    let ancestor = git::run(&["merge-base", "--is-ancestor", &commit, "HEAD"]).is_some();
+    let subject = git::run(&["log", "-1", "--format=%s", &commit]).unwrap_or_default();
     let prefix = format!("chore(release): {version}");
-    let rest = subject.trim().strip_prefix(&prefix)?;
-    (rest.is_empty() || rest.starts_with(' ')).then_some(version)
+    let is_release = subject
+        .trim()
+        .strip_prefix(&prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+    if !ancestor || !is_release {
+        return Err(fail(format!(
+            "tag {tag} is not on a `{prefix}` commit in the history of HEAD."
+        )));
+    }
+    if plan::release_version(tags).is_some() {
+        return Err(fail(format!(
+            "commits after {tag} publish a new version; that is a new release, not a resume."
+        )));
+    }
+    let current = manifest_version()?;
+    if current != version.to_string() {
+        return Err(fail(format!(
+            "{} says {current}, not {version}.",
+            rewrite::MANIFEST
+        )));
+    }
+    Ok(Some(version))
 }
 
 /// Runs `program` and returns its standard output, or its failure explained.
