@@ -4,3 +4,8 @@
 *.log
 .DS_Store
 /bin/
+
+# Local assistant tooling
+/.agents/
+/.claude/
+/skills-lock.json
