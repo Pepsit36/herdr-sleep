@@ -10,7 +10,7 @@ use crate::git::{self, Tags};
 use crate::plan;
 use crate::version::Version;
 
-use super::{capture, finished_at_head, manifest_version, read, rewrite, root};
+use super::{capture, manifest_version, read, resume_version, rewrite, root};
 
 fn git_in(args: &[&str]) -> Result<String, Failure> {
     capture("git", args).map_err(error)
@@ -97,7 +97,7 @@ pub(super) fn run(args: &[String], dry_run: bool) -> Outcome {
     let branch = options.get("--branch").unwrap_or("main");
 
     let tags = Tags::load();
-    if let Some(version) = finished_at_head(&tags) {
+    if let Some(version) = resume_version(&tags)? {
         println!(
             "release commit: {} is already committed and tagged; nothing to do.",
             version.tag()

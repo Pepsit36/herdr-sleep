@@ -45,10 +45,12 @@ your Herdr, it runs everything in containers.
 Versions are computed from the commits, never edited by hand (ADR 0007). No em dash anywhere, and
 code, comments and docs are in English.
 
-A release that stopped after its tag (for example at `publish-github`) is finished from `main`:
-create a pipeline on it (`POST /projects/:id/pipeline?ref=main`, or Run pipeline in the UI).
-Because HEAD is the tagged release commit, `release prepare` resumes it and `release commit` does
-nothing, so the build jobs run again and `release` only completes the missing publication.
+A release that stopped after its commit and tag exist (for example at `publish-github`) is
+finished from `main` by a pipeline created with the variable `RESUME_RELEASE=1`: Build > Pipelines >
+Run pipeline on `main` in the UI, or `POST /projects/:id/pipeline?ref=main` with
+`{"variables":[{"key":"RESUME_RELEASE","value":"1"}]}`. `release prepare` then reports the last
+release again (it refuses when something publishable follows its commit), `release commit` does
+nothing, and the build and release jobs complete the missing publication.
 
 ## Reporting a problem
 
