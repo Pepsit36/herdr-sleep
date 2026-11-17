@@ -45,8 +45,10 @@ const DEFAULT_PREVIEW_LINES: u32 = 20;
 const MAX_PREVIEW_LINES: i64 = 200;
 const DEFAULT_SWEEP_INTERVAL_SECONDS: u64 = 60;
 const SWEEP_INTERVAL_RANGE: std::ops::RangeInclusive<i64> = 5..=3600;
+const DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS: u64 = 60;
+const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 15] = [
+const TOP_LEVEL_KEYS: [&str; 16] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
@@ -61,6 +63,7 @@ const TOP_LEVEL_KEYS: [&str; 15] = [
     "protect_env_vars",
     "ignore_child_regex",
     "sweep_interval_seconds",
+    "restore_settle_timeout_seconds",
     "agents",
 ];
 
@@ -264,6 +267,7 @@ pub struct Config {
     #[serde(serialize_with = "ser_regexes")]
     pub ignore_child_regex: Vec<Regex>,
     pub sweep_interval_seconds: u64,
+    pub restore_settle_timeout_seconds: u64,
     /// Managed Profiles by Kind: built-ins with overrides plus custom kinds.
     pub profiles: BTreeMap<String, Profile>,
     /// Non-fatal findings (unknown keys, unmanaged custom kinds).
@@ -295,6 +299,7 @@ struct RawConfig {
     protect_env_vars: Option<Vec<String>>,
     ignore_child_regex: Option<Vec<String>>,
     sweep_interval_seconds: Option<i64>,
+    restore_settle_timeout_seconds: Option<i64>,
     agents: BTreeMap<String, RawAgent>,
 }
 
@@ -488,6 +493,20 @@ impl Config {
             ));
         }
 
+        let settle = raw
+            .restore_settle_timeout_seconds
+            .unwrap_or(DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS as i64);
+        if !RESTORE_SETTLE_TIMEOUT_RANGE.contains(&settle) {
+            return Err(ConfigError::key(
+                "restore_settle_timeout_seconds",
+                format!(
+                    "{settle} is out of range {}..={}",
+                    RESTORE_SETTLE_TIMEOUT_RANGE.start(),
+                    RESTORE_SETTLE_TIMEOUT_RANGE.end()
+                ),
+            ));
+        }
+
         let protect_env_vars = raw.protect_env_vars.unwrap_or_default();
         for name in &protect_env_vars {
             let valid = name
@@ -531,6 +550,7 @@ impl Config {
             protect_env_vars,
             ignore_child_regex,
             sweep_interval_seconds: sweep as u64,
+            restore_settle_timeout_seconds: settle as u64,
             profiles,
             warnings,
         })
@@ -539,6 +559,12 @@ impl Config {
     /// Idle time after which a Settled agent goes to sleep.
     pub fn sleep_after(&self) -> Duration {
         Duration::from_secs(self.sleep_after_minutes.saturating_mul(60))
+    }
+
+    /// Longest wait of `restore`, per pane and per pass, for a pane to be
+    /// ready for its Placeholder.
+    pub fn restore_settle_timeout(&self) -> Duration {
+        Duration::from_secs(self.restore_settle_timeout_seconds)
     }
 
     /// Whether an agent in `status` may be put to sleep.
@@ -632,6 +658,10 @@ impl Config {
 
 # Seconds between two sweeps of the watcher (5 to 3600).
 #sweep_interval_seconds = {DEFAULT_SWEEP_INTERVAL_SECONDS}
+
+# Seconds `restore` waits, per pane and per pass, for the pane's shell and for Herdr to
+# release the native agent identity after a Herdr restart (5 to 600).
+#restore_settle_timeout_seconds = {DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS}
 
 # Per-kind profiles. A table overrides single fields of a built-in kind (claude,
 # codex, cursor, gemini) or defines a new kind, which needs all four fields.
@@ -784,6 +814,8 @@ mod tests {
         assert!(c.tab_prefix && c.notify);
         assert_eq!(c.preview_lines, 20);
         assert_eq!(c.sweep_interval_seconds, 60);
+        assert_eq!(c.restore_settle_timeout_seconds, 60);
+        assert_eq!(c.restore_settle_timeout(), Duration::from_secs(60));
         assert!(c.include_names.is_empty() && c.exclude_names.is_empty());
         assert!(c.protect_env_vars.is_empty() && c.exclude_cwd_regex.is_empty());
         assert_eq!(c.ignore_child_regex.len(), 8);
@@ -854,6 +886,12 @@ exclude_names = ["b"]"#);
         assert!(err("preview_lines = 201").contains("preview_lines"));
         assert!(err("preview_lines = -1").contains("preview_lines"));
         assert!(err("sweep_interval_seconds = 4").contains("sweep_interval_seconds"));
+        assert!(
+            err("restore_settle_timeout_seconds = 4").contains("restore_settle_timeout_seconds")
+        );
+        assert!(
+            err("restore_settle_timeout_seconds = 601").contains("restore_settle_timeout_seconds")
+        );
         assert!(err("sweep_interval_seconds = 3601").contains("sweep_interval_seconds"));
         assert!(err(r#"token_name = "a b""#).contains("token_name"));
         assert!(err(r#"token_name = """#).contains("token_name"));

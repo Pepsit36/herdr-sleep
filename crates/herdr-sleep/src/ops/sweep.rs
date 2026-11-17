@@ -153,6 +153,23 @@ pub fn sweep_with_mode(
     state: &mut SweepState,
     mode: SleepMode,
 ) -> SweepReport {
+    sweep_pass(env, config, state, mode, false)
+}
+
+/// A Sweep that does not wait for the Idle time: every Settled, unfocused
+/// agent is due now, and the cap of [`MAX_SLEEPS_PER_SWEEP`] does not apply.
+/// The other Guards still apply.
+pub fn sweep_now(env: &dyn Env, config: &Config, state: &mut SweepState) -> SweepReport {
+    sweep_pass(env, config, state, SleepMode::Sweep, true)
+}
+
+fn sweep_pass(
+    env: &dyn Env,
+    config: &Config,
+    state: &mut SweepState,
+    mode: SleepMode,
+    immediate: bool,
+) -> SweepReport {
     let mut report = SweepReport::default();
     let snapshot = match env.snapshot() {
         Ok(snapshot) => snapshot,
@@ -184,7 +201,7 @@ pub fn sweep_with_mode(
         };
         let eligible = !focused
             && config.allows_status(agent.agent_status)
-            && now.saturating_sub(clock.since_ms) >= sleep_after_ms;
+            && (immediate || now.saturating_sub(clock.since_ms) >= sleep_after_ms);
         if eligible {
             due.push(agent);
         }
@@ -193,7 +210,7 @@ pub fn sweep_with_mode(
 
     let mut attempts = 0;
     for agent in due {
-        if attempts >= MAX_SLEEPS_PER_SWEEP {
+        if !immediate && attempts >= MAX_SLEEPS_PER_SWEEP {
             report.deferred += 1;
             continue;
         }
@@ -569,6 +586,36 @@ mod tests {
         assert_eq!(report.deferred, 2);
         // A dry run leaves the agents awake, so the same ones are due again.
         assert_eq!(pass(&fake, &config, &mut state).dry_run.len(), 3);
+    }
+
+    #[test]
+    fn a_sweep_now_does_not_wait_for_the_idle_time_nor_the_cap() {
+        let fake = Fake::new("now");
+        for n in 1..=5 {
+            fake.add(&format!("p{n}"), AgentStatus::Idle, 1);
+        }
+        let (config, mut state) = (config(600), SweepState::default());
+        assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
+        let report = sweep_now(&fake, &config, &mut state);
+        assert_eq!(report.dry_run.len(), 5);
+        assert_eq!(report.deferred, 0);
+    }
+
+    #[test]
+    fn a_sweep_now_keeps_the_other_guards() {
+        let fake = Fake::new("now-guards");
+        fake.add("p1", AgentStatus::Idle, 1);
+        fake.add("p2", AgentStatus::Working, 1);
+        fake.add("p3", AgentStatus::Idle, 1);
+        fake.refusals
+            .borrow_mut()
+            .insert("p3".into(), Refusal::DraftInPrompt);
+        let report = sweep_now(&fake, &config(600), &mut SweepState::default());
+        assert_eq!(report.dry_run, ["p1"]);
+        assert_eq!(
+            report.refused,
+            [("p3".to_string(), "draft-in-prompt".to_string())]
+        );
     }
 
     #[test]

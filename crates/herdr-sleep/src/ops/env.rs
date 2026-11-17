@@ -32,6 +32,18 @@ pub trait Env {
     fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String>;
     /// Give the agent in `pane` the name `name`.
     fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()>;
+    /// Start the agent `kind` named `name` in `pane`, which sits at its shell
+    /// prompt, with `args` after its binary, and wait until it is ready.
+    fn start_agent(
+        &self,
+        _name: &str,
+        _kind: &str,
+        _pane: &str,
+        _args: &[String],
+        _timeout: Duration,
+    ) -> EnvResult<()> {
+        Err("starting an agent is not supported here".into())
+    }
     /// Type text into a pane without pressing Enter.
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()>;
     /// Press logical keys in a pane.
@@ -67,6 +79,11 @@ pub trait Env {
     fn main_bin(&self) -> PathBuf;
     /// The `herdr` binary, as an absolute path when it can be resolved.
     fn herdr_bin(&self) -> PathBuf;
+
+    /// Whether `path` is an existing directory.
+    fn dir_exists(&self, path: &str) -> bool {
+        Path::new(path).is_dir()
+    }
 
     /// Pause for `duration`.
     fn sleep(&self, duration: Duration);
@@ -152,6 +169,19 @@ impl Env for LiveEnv {
 
     fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()> {
         self.client.agent_rename(pane, name).map_err(message)
+    }
+
+    fn start_agent(
+        &self,
+        name: &str,
+        kind: &str,
+        pane: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> EnvResult<()> {
+        self.client
+            .agent_start(name, kind, pane, timeout, args)
+            .map_err(message)
     }
 
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {

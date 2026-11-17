@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use herdr_sleep::config::Config;
 use herdr_sleep::herdr::{AgentStatus, HerdrClient, ProcessInfo, Snapshot};
+use herdr_sleep::ops::RestoreReport;
 use herdr_sleep::ops::{Env, LiveEnv, SweepState, is_focused, signature};
 use herdr_sleep::procs::{self, ProcessTable};
 use herdr_sleep::watcher::{self, WatcherInfo};
@@ -255,16 +256,53 @@ pub fn run(json: bool) -> ExitCode {
         watcher,
         state_dir: state_dir.as_deref(),
     });
+    // Panes the last restore could not put to sleep, when there are any.
+    let restore = state_dir
+        .as_deref()
+        .and_then(RestoreReport::load)
+        .filter(|r| !r.skipped.is_empty() || !r.missing_cwd.is_empty());
     if json {
-        match serde_json::to_string(&report) {
-            Ok(text) => emit(&text),
+        let mut value = match serde_json::to_value(&report) {
+            Ok(value) => value,
             Err(error) => return fail(format!("cannot print the report: {error}")),
+        };
+        if let (Some(restore), Some(object)) = (&restore, value.as_object_mut()) {
+            object.insert(
+                "restore".into(),
+                serde_json::json!({
+                    "skipped": restore.skipped,
+                    "missing_cwd": restore.missing_cwd,
+                }),
+            );
         }
+        emit(&value.to_string());
     } else {
         // `render` ends every line with a newline.
         emit(render(&report, &config.sleep_icon).trim_end_matches('\n'));
+        for line in restore.iter().flat_map(restore_lines) {
+            emit(&line);
+        }
     }
     ExitCode::SUCCESS
+}
+
+/// The lines `status` adds about the last restore: panes left alone, and
+/// panes whose working directory is gone.
+pub fn restore_lines(restore: &RestoreReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.extend(
+        restore
+            .skipped
+            .iter()
+            .map(|(pane, reason)| format!("restore: {pane} left alone: {reason}")),
+    );
+    lines.extend(
+        restore
+            .missing_cwd
+            .iter()
+            .map(|(pane, cwd)| format!("restore: {pane} ignored, working directory gone: {cwd}")),
+    );
+    lines
 }
 
 #[cfg(test)]
@@ -400,6 +438,23 @@ mod tests {
             infos,
             table: table(),
         }
+    }
+
+    #[test]
+    fn the_last_restore_is_listed() {
+        let restore = RestoreReport {
+            skipped: vec![("p1".into(), "identity-not-released".into())],
+            missing_cwd: vec![("p2".into(), "/gone".into())],
+            ..RestoreReport::default()
+        };
+        assert_eq!(
+            restore_lines(&restore),
+            [
+                "restore: p1 left alone: identity-not-released",
+                "restore: p2 ignored, working directory gone: /gone"
+            ]
+        );
+        assert!(restore_lines(&RestoreReport::default()).is_empty());
     }
 
     #[test]

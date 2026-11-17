@@ -203,6 +203,10 @@ pub struct Pane {
     pub tokens: Option<HashMap<String, String>>,
     #[serde(default)]
     pub scroll: Option<Scroll>,
+    /// Why Herdr could not restore the pane as it was (for example
+    /// `Saved directory is unavailable`).
+    #[serde(default)]
+    pub restore_error: Option<String>,
 }
 
 agent_fields_helpers!(Pane);

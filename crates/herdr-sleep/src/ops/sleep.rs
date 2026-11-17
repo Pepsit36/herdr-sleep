@@ -65,6 +65,59 @@ pub enum SleepOutcome {
     Warned(String),
 }
 
+/// Pause between two attempts of [`sleep_agent_waiting`].
+const WAIT_POLL: Duration = Duration::from_secs(2);
+
+/// Whether a refusal may go away by itself: the agent is still working, or
+/// has just started and shows no prompt or session yet.
+fn is_transient(refusal: &Refusal) -> bool {
+    matches!(
+        refusal,
+        Refusal::NotSettled(_)
+            | Refusal::NoSession
+            | Refusal::NoConversation
+            | Refusal::PromptNotDetected
+    )
+}
+
+/// [`sleep_agent`], tried again every few seconds for up to `timeout` while
+/// the refusal is one that may go away by itself (see [`is_transient`]). The
+/// outcome is the last one.
+pub fn sleep_agent_waiting(
+    env: &dyn Env,
+    config: &Config,
+    agent: &Agent,
+    mode: SleepMode,
+    timeout: Duration,
+) -> SleepOutcome {
+    let start = env.now();
+    let mut current = agent.clone();
+    loop {
+        // Wait for the status first: the refusal of every attempt would be
+        // journaled.
+        while mode != SleepMode::Force
+            && !config.allows_status(current.agent_status)
+            && env.now().duration_since(start) < timeout
+        {
+            env.sleep(WAIT_POLL);
+            if let Ok(fresh) = env.agent(&agent.pane_id) {
+                current = fresh;
+            }
+        }
+        let outcome = sleep_agent(env, config, &current, mode, None);
+        let SleepOutcome::Skipped(refusal) = &outcome else {
+            return outcome;
+        };
+        if !is_transient(refusal) || env.now().duration_since(start) >= timeout {
+            return outcome;
+        }
+        env.sleep(WAIT_POLL);
+        if let Ok(fresh) = env.agent(&agent.pane_id) {
+            current = fresh;
+        }
+    }
+}
+
 /// Put `agent` to sleep.
 ///
 /// `last_skip` is the code of the refusal the previous Sweep logged for this
@@ -1021,6 +1074,66 @@ mod tests {
         assert!(exec_call(&fake).is_some());
         assert!(fake.journal().contains(" WARN worker (w1-2)"));
         assert!(!fake.calls().iter().any(|c| c.starts_with("notify")));
+    }
+
+    #[test]
+    fn waiting_gives_a_busy_agent_time_before_the_guards_run() {
+        let mut fake = Fake::new("wait-busy");
+        fake.agent.agent_status = AgentStatus::Working;
+        fake.guards = Err(Refusal::NotSettled(AgentStatus::Working));
+        let outcome = sleep_agent_waiting(
+            &fake,
+            &config(),
+            &fake.agent,
+            SleepMode::Manual,
+            Duration::from_secs(10),
+        );
+        assert_eq!(
+            outcome,
+            SleepOutcome::Skipped(Refusal::NotSettled(AgentStatus::Working))
+        );
+        assert!(fake.clock() >= Duration::from_secs(10));
+        // One attempt, not one per poll: the journal would repeat the refusal.
+        let guards = fake
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("guards"))
+            .count();
+        assert_eq!(guards, 1);
+    }
+
+    #[test]
+    fn waiting_retries_a_transient_refusal_only() {
+        let mut fake = Fake::new("wait-transient");
+        fake.guards = Err(Refusal::PromptNotDetected);
+        let outcome = sleep_agent_waiting(
+            &fake,
+            &config(),
+            &fake.agent,
+            SleepMode::Manual,
+            Duration::from_secs(6),
+        );
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::PromptNotDetected));
+        let guards = |fake: &Fake| {
+            fake.calls()
+                .iter()
+                .filter(|c| c.starts_with("guards"))
+                .count()
+        };
+        assert!(guards(&fake) > 1);
+
+        let mut fake = Fake::new("wait-final");
+        fake.guards = Err(Refusal::DraftInPrompt);
+        let outcome = sleep_agent_waiting(
+            &fake,
+            &config(),
+            &fake.agent,
+            SleepMode::Manual,
+            Duration::from_secs(60),
+        );
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::DraftInPrompt));
+        assert_eq!(guards(&fake), 1);
+        assert!(fake.clock() < Duration::from_secs(5));
     }
 
     #[test]

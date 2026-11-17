@@ -684,6 +684,30 @@ impl HerdrClient {
         self.act(&args)
     }
 
+    /// `herdr agent start <name> --kind <kind> --pane <pane> --timeout <ms> -- <args...>`:
+    /// start the agent in a pane that sits at its shell prompt and wait until
+    /// it is ready for input.
+    pub fn agent_start(
+        &self,
+        name: &str,
+        kind: &str,
+        pane: &str,
+        timeout: Duration,
+        agent_args: &[String],
+    ) -> Result<(), HerdrError> {
+        let mut args = strings(&["agent", "start", name, "--kind", kind, "--pane", pane]);
+        args.push("--timeout".into());
+        args.push(timeout.as_millis().to_string());
+        if !agent_args.is_empty() {
+            args.push("--".into());
+            args.extend(agent_args.iter().cloned());
+        }
+        // Herdr itself waits for the agent: this call must outlast it.
+        self.clone()
+            .with_timeout(timeout + Duration::from_secs(5))
+            .act(&args)
+    }
+
     /// `herdr agent focus <pane>`
     pub fn agent_focus(&self, pane: &str) -> Result<(), HerdrError> {
         self.act(&strings(&["agent", "focus", pane]))
