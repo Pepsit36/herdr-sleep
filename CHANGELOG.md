@@ -14,6 +14,36 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-17
+
+<!-- stamped -->
+
+### Added
+
+- **Restart:** after a Herdr restart, agents that were awake (not only the ones that slept) are put to
+  sleep again. Herdr keeps their saved session; the plugin starts each agent again with its
+  session, one at a time, and puts it to sleep once it is ready, so no pane is left as a plain shell.
+- **Restart:** `restore_settle_timeout_seconds` (60 s by default) sets how long `restore` waits for a
+  pane's shell and for Herdr to release the agent's identity. Panes that were not ready get a second
+  pass, and the end of `restore` reports how many were restored, left alone, or ignored because their
+  working directory is gone (listed apart, also in `herdr-sleep status`).
+- `herdr-sleep sleep <pane>` handles a pane with no live agent but a saved session (resume, then
+  sleep), and `--from-session` forces that path.
+- `herdr-sleep sleep --wait[=SECONDS]` keeps trying while the agent is not idle yet.
+- `herdr-sleep sweep --now` puts every settled, unfocused agent to sleep without waiting for the idle
+  time, and without the limit of three agents per pass. The other guards still apply.
+
+### Changed
+
+- A refused or failed `herdr-sleep sleep` now prints the reason on stderr, with what to try next
+  (`--wait`, `--force`), instead of a line on stdout.
+
+### Fixed
+
+- Agents that were awake at a Herdr restart stayed plain shells with no sleep marker, and `sweep`,
+  `sleep` and `restore` could not reach them.
+- A pane that Herdr had not released within 20 seconds was skipped and never retried.
+
 ## [0.1.0] - 2026-11-08
 
 <!-- stamped -->
