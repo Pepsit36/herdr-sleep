@@ -15,6 +15,6 @@ After a Herdr restart a sleeping pane comes back as a plain shell, and the plugi
 ## Consequences
 
 - Nothing depends on the `PATH` or on a timer: the restore uses absolute paths and the observable state of the pane.
-- Herdr starts the pane's shell when a client attaches, so `restore` waits (20 s per pane) for the shell and for the identity release, and skips the pane after that. `restore` also starts the Watcher when it ends, because startup hooks run concurrently.
+- Herdr starts the pane's shell when a client attaches, so `restore` waits (20 s per pane at the time, `restore_settle_timeout_seconds` since ADR 0009) for the shell and for the identity release, and skips the pane after that. `restore` also starts the Watcher when it ends, because startup hooks run concurrently.
 - The registry is a second source of truth next to Herdr; it is tolerant to loss (a pane missing from it stays a plain shell) and to staleness (an entry is only acted on when the pane has no agent and sits at a shell prompt).
 - The Placeholder declares its identity once, when it starts. Herdr's own process detection still clears the agent name a fraction of a second after the Sleeping agent appears (observed on Herdr 0.9.2 and 0.9.5: about 200 ms later, `agent get` then has no `name`, while the agent label, session and tokens stay). Nothing signals it in advance, so the Placeholder polls `herdr agent get` every 50 ms, gives the name again as soon as it is gone, and stops after at most 1.5 s if it never goes. A name given after the clearing is kept.

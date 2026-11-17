@@ -321,7 +321,9 @@ s5_restart() {
   if [ -n "$(placeholder_pid "$PANE_A")" ]; then ok "a Placeholder runs in the pane (started by the plugin, not on PATH)"; else bad "no Placeholder process in the pane"; fi
   if pgrep -u "$(id -u)" -x claude >/dev/null; then bad "a claude process runs after the restart"; else ok "no agent process was started"; fi
   if wait_for 15 is_named "$PANE_A" alpha; then ok "the name alpha is kept"; else bad "the name after the restart is '$(agent_name "$PANE_A")'"; fi
-  if grep -q "RESTORE $PANE_A" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; then ok "the journal records the restore"; else bad "no RESTORE line in the journal"; fi
+  restore_logged() { grep -q "RESTORE $PANE_A" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; }
+  # The line is written right after the Placeholder reports, which is what the wait above saw.
+  if wait_for 10 restore_logged; then ok "the journal records the restore"; else bad "no RESTORE line in the journal"; fi
   if command -v herdr-sleep-ph >/dev/null; then bad "herdr-sleep-ph is on PATH"; else ok "herdr-sleep-ph is not on PATH"; fi
   herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
   if wait_for 40 is_awake_idle "$PANE_A"; then ok "the restored pane wakes"; else bad "the restored pane did not wake (kind=$(agent_kind "$PANE_A"))"; fi
@@ -389,6 +391,64 @@ s8_watcher() {
   if wait_for 15 is_named "$PANE_A" alpha; then ok "the name alpha is kept"; else bad "the name is '$(agent_name "$PANE_A")', expected alpha"; fi
 }
 
+s9_restart_with_an_awake_agent() {
+  new_world "$CONFIG_MANUAL" || return
+  local split second sid_b
+  split="$(herdr pane split "$PANE_A" --direction right --no-focus)"
+  second="$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id // empty' <<<"$split")"
+  if [ -z "$second" ]; then
+    bad "pane split gave no pane: $split"
+    return
+  fi
+  start_agent "$second" beta || return
+  sid_b="$(agent_session "$second")"
+  # alpha sleeps (it is in the registry); beta stays awake and idle, so only Herdr's Saved
+  # session knows it after the restart.
+  sleep_alpha || return
+  if stop_server; then ok "the server stopped"; else
+    bad "the server did not stop"
+    return
+  fi
+  if start_server; then ok "the server started again"; else
+    bad "the server did not restart"
+    return
+  fi
+  attach_client
+  if wait_for 90 is_asleep "$PANE_A"; then ok "alpha (registered) is sleeping-claude again"; else bad "alpha is kind='$(agent_kind "$PANE_A")' after the restart"; fi
+  if wait_for 90 is_asleep "$second"; then ok "beta (never put to sleep) is sleeping-claude after the restart"; else
+    bad "beta is kind='$(agent_kind "$second")' status='$(agent_status "$second")' after the restart"
+    note "pane: $(herdr pane get "$second" 2>&1 | head -c 500)"
+    note "journal: $(tail -n 6 "$STATE_DIR/herdr-sleep.log" 2>/dev/null | tr '\n' '|')"
+    return
+  fi
+  if pgrep -u "$(id -u)" -x claude >/dev/null; then bad "a claude process runs after the restart"; else ok "no agent process was started"; fi
+  # Herdr forgets the name of an agent that never slept: it comes back as <kind>-<pane>.
+  if wait_for 15 is_named "$second" "claude-${second//:/_}"; then ok "beta gets the fallback name claude-${second//:/_}"; else bad "beta's name is '$(agent_name "$second")'"; fi
+  if grep -q "RESTORE-DONE restored=2 skipped=0 missing_cwd=0" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; then ok "the journal sums the restore up"; else bad "no RESTORE-DONE restored=2 line"; fi
+  herdr pane send-keys "$second" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$second"; then ok "beta wakes"; else bad "beta did not wake (kind=$(agent_kind "$second"))"; fi
+  if [ "$(agent_session "$second")" = "$sid_b" ]; then ok "beta resumes its own session"; else bad "beta's session is '$(agent_session "$second")', expected $sid_b"; fi
+}
+
+s10_sweep_now_and_sleep_errors() {
+  new_world "$CONFIG_MANUAL" || return
+  local out rc
+  # The idle time (600 minutes) is far away: a plain sweep leaves alpha alone.
+  hs sweep >/dev/null 2>&1
+  if is_awake_idle "$PANE_A"; then ok "a plain sweep leaves alpha awake"; else bad "alpha is '$(agent_kind "$PANE_A")' after a plain sweep"; fi
+  # No pane at all: an explicit error on stderr, exit code 1.
+  out="$(hs sleep w999:p999 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [ -n "$out" ]; then ok "an unknown pane exits 1 with a message ($out)"; else bad "unknown pane: rc=$rc stderr='$out'"; fi
+  # A sweep that does not wait for the idle time.
+  hs sweep --now --json >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "sweep --now put alpha to sleep"; else bad "alpha is '$(agent_kind "$PANE_A")' after sweep --now"; fi
+  # Refused sleep: asleep already; the reason is on stderr.
+  out="$(hs sleep alpha 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [ -n "$out" ]; then ok "a refused sleep explains itself on stderr"; else bad "refused sleep: rc=$rc stderr='$out'"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -398,6 +458,8 @@ SCENARIOS=(
   "s6|two sleeping panes in one tab|s6_two_panes_in_a_tab"
   "s7|draft guard on manual sleep|s7_draft_guard"
   "s8|the Watcher sleeps an idle agent|s8_watcher"
+  "s9|restart with an awake agent (Saved session)|s9_restart_with_an_awake_agent"
+  "s10|sweep --now and explicit sleep errors|s10_sweep_now_and_sleep_errors"
 )
 
 # ---------------------------------------------------------------------------
