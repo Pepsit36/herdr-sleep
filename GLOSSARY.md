@@ -61,8 +61,12 @@ Launching the Agent again with its Session, in place of the Placeholder, through
 _Avoid_: Resume (reserved for the agent-side command), restore, unpark
 
 **Restore**:
-Putting the Placeholder back, after a Herdr restart, in every pane that was asleep before it, without starting any Agent.
+After a Herdr restart, putting every pane back to sleep that was asleep before it or that holds a Saved session. A pane that was asleep gets its Placeholder back without starting any Agent; a Saved session pane first gets its Agent back, one at a time, then sleeps.
 _Avoid_: Resume (reserved for the agent-side command), relaunch
+
+**Saved session**:
+The Session Herdr keeps for a pane whose Agent a restart stopped: the pane is a plain shell with no live Agent, and the Session says which conversation it held.
+_Avoid_: Orphan, dangling session
 
 **Wake trigger**:
 Any event that causes a Wake: the pane receiving focus, any key pressed in the Placeholder, a prompt sent to the pane, or an explicit `wake` command.

@@ -47,12 +47,16 @@ Update with `herdr plugin update`.
    with `herdr agent prompt`, or running `herdr-sleep wake` starts the agent again with its
    `--resume`. The pane name comes back, and what you typed meanwhile is typed into the agent when
    it shows its prompt.
-4. **After a Herdr restart,** the plugin restores sleeping panes as placeholders at startup, without
-   starting any agent, instead of letting Herdr relaunch them all at once. Set
-   `resume_agents_on_restore = false` in the `[session]` section of Herdr's config so that Herdr does
-   not also relaunch them. Only panes that still exist, have no agent and sit at a shell prompt are
-   restored (Herdr starts a restored pane's shell when a client attaches, so the plugin waits up to
-   20 seconds per pane); the others are left alone and logged as `RESTORE-SKIP` in the journal.
+4. **After a Herdr restart,** the plugin puts every pane back to sleep at startup, instead of letting
+   Herdr relaunch all the agents at once. Set `resume_agents_on_restore = false` in the `[session]`
+   section of Herdr's config so that Herdr does not also relaunch them. Panes that were asleep get
+   their placeholder back without starting any agent. Agents that were awake (Herdr keeps their
+   saved session) are started again with `--resume`, one at a time, and put to sleep as soon as they
+   are ready. Only panes that still exist, have no agent, sit at a shell prompt and still have their
+   working directory are handled. Herdr starts a restored pane's shell when a client attaches, so
+   the plugin waits up to `restore_settle_timeout_seconds` per pane and gives the panes that were not
+   ready a second pass. The others are left alone and logged as `RESTORE-SKIP` in the journal;
+   panes whose directory is gone are listed apart.
 
 ## Sidebar marker
 
@@ -119,6 +123,10 @@ ignore_child_regex = ["mcp", "npm exec", "language-server", "tsserver", "caffein
 # Watcher
 sweep_interval_seconds = 60
 
+# After a Herdr restart: seconds to wait, per pane and per pass, for the pane's shell
+# and for Herdr to release the agent's identity (5 to 600).
+restore_settle_timeout_seconds = 60
+
 # Agents. Built in: claude, codex, cursor, gemini. A table overrides fields of a built-in
 # or adds an agent; a new agent needs all four keys.
 [agents.myagent]
@@ -135,13 +143,21 @@ The configuration is re-read on every sweep.
 ```
 herdr-sleep status [--json]                 list the managed agents and the watcher
 herdr-sleep sleep [<pane|name>] [--force]   put one agent to sleep (--force skips the guards)
+                  [--wait[=SECONDS]]        keep trying while the agent is not idle yet (default 120 s)
+                  [--from-session]          resume the saved session of a pane with no agent, then sleep
 herdr-sleep wake  [<pane|name>] [--no-wait] wake one agent
-herdr-sleep sweep [--json]                  sleep every agent that is idle long enough, now
+herdr-sleep sweep [--now] [--json]          sleep every agent that is idle long enough, now
+                                            (--now: do not wait for the idle time)
+herdr-sleep restore [--json]                put panes back to sleep after a Herdr restart (run by the
+                                            startup hook, safe to run by hand)
 herdr-sleep config [--json]                 print the effective configuration
 herdr-sleep ensure-watcher                  start the watcher unless it is running
 ```
 
 Without a pane or name, `sleep` and `wake` act on the pane of the Herdr action that started them.
+A refused `sleep` prints the reason on stderr, exits 1 and says what to try (`--wait`, `--force`).
+When the pane has no live agent but Herdr holds a saved session for it, `sleep <pane>` resumes the
+agent and puts it to sleep.
 `herdr-sleep <command> --help` documents the options, `--json` output and exit codes.
 
 Sending a prompt with `herdr agent prompt` to a sleeping agent works: the text wakes the pane and
@@ -159,14 +175,16 @@ is replayed into the agent once it is ready.
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
 - **See what would happen** with `dry_run = true`.
 - Sleeping panes after a Herdr restart appear once a Herdr client attaches; panes the plugin could
-  not restore are listed as `RESTORE-SKIP <pane> <reason>` in the journal, followed by a
-  `RESTORE-DONE restored=N skipped=M` line. The panes it knows about are in `sleepers.json` in the
-  state directory.
+  not restore are listed as `RESTORE-SKIP <pane> <reason>` in the journal (and by `herdr-sleep
+  status`), followed by a `RESTORE-DONE restored=N skipped=M missing_cwd=K` line. Panes whose
+  working directory is gone are `RESTORE-CWD`. Run `herdr-sleep restore` again to retry them; raise
+  `restore_settle_timeout_seconds` when many panes are skipped as `identity-not-released`. The panes
+  that were asleep are in `sleepers.json` in the state directory.
 
 ## What is verified
 
 - **Claude Code**: sleep, wake by focus, key and prompt, replay, draft guard, tab and space markers
-  and restart recovery are covered by an end-to-end suite that runs the plugin against real Herdr
+  and restart recovery (including agents that were awake at the restart) are covered by an end-to-end suite that runs the plugin against real Herdr
   binaries (0.9.2 and the latest release) in Docker, with a scripted stand-in for the agent that
   reproduces Claude Code's prompt. Prompt detection was checked against real Claude Code screens.
 - **Codex, Cursor, Gemini**: built-in profiles are best effort and have not been run against the real
