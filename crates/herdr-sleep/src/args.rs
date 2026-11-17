@@ -34,6 +34,10 @@ pub enum Invocation {
         /// `None` when the action context must provide the pane.
         target: Option<String>,
         force: bool,
+        /// Put the Saved session of a pane with no live Agent to sleep.
+        from_session: bool,
+        /// Seconds to keep trying while the Agent is not yet Settled.
+        wait: Option<u64>,
         json: bool,
     },
     Wake {
@@ -45,6 +49,8 @@ pub enum Invocation {
         json: bool,
     },
     Sweep {
+        /// Do not wait for the Idle time.
+        now: bool,
         json: bool,
     },
     Config {
@@ -160,16 +166,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         return Invocation::Unknown(first);
     };
     match command {
-        "sleep" => finish(
-            command,
-            split(command, args, &["--force", "--json"]),
-            1,
-            |p, mut pos| Invocation::Sleep {
-                target: pos.pop(),
-                force: p.has("--force"),
-                json: p.has("--json"),
-            },
-        ),
+        "sleep" => parse_sleep(args),
         "wake" => finish(
             command,
             split(command, args, &["--no-wait", "--json"]),
@@ -185,11 +182,15 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
                 json: p.has("--json"),
             }
         }),
-        "sweep" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
-            Invocation::Sweep {
+        "sweep" => finish(
+            command,
+            split(command, args, &["--now", "--json"]),
+            0,
+            |p, _| Invocation::Sweep {
+                now: p.has("--now"),
                 json: p.has("--json"),
-            }
-        }),
+            },
+        ),
         "config" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
             Invocation::Config {
                 json: p.has("--json"),
@@ -215,6 +216,55 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         }),
         _ => parse_replay(args),
     }
+}
+
+/// Seconds `sleep --wait` keeps trying when no value is given.
+pub const DEFAULT_WAIT_SECONDS: u64 = 120;
+
+/// `sleep [<pane|name>] [--force] [--from-session] [--wait[=SECONDS]] [--json]`.
+fn parse_sleep(args: impl Iterator<Item = String>) -> Invocation {
+    let mut wait = None;
+    let mut wait_error = None;
+    let mut rest = Vec::new();
+    let mut options_ended = false;
+    for arg in args {
+        if options_ended || !arg.starts_with("--wait") {
+            options_ended |= arg == "--";
+            rest.push(arg);
+        } else if arg == "--wait" {
+            wait = Some(DEFAULT_WAIT_SECONDS);
+        } else if let Some(value) = arg.strip_prefix("--wait=") {
+            match value.parse::<u64>() {
+                Ok(seconds) if seconds > 0 => wait = Some(seconds),
+                _ => {
+                    wait_error.get_or_insert(format!(
+                        "sleep: --wait expects a number of seconds above 0, got '{value}'"
+                    ));
+                }
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    let parsed = split(
+        "sleep",
+        rest.into_iter(),
+        &["--force", "--from-session", "--json"],
+    );
+    let parsed = match (parsed.error.is_none(), wait_error) {
+        (true, Some(error)) => Split {
+            error: Some(error),
+            ..parsed
+        },
+        _ => parsed,
+    };
+    finish("sleep", parsed, 1, |p, mut pos| Invocation::Sleep {
+        target: pos.pop(),
+        force: p.has("--force"),
+        from_session: p.has("--from-session"),
+        wait,
+        json: p.has("--json"),
+    })
 }
 
 /// `help` alone, or `help <command>`.
@@ -278,6 +328,8 @@ mod tests {
         Invocation::Sleep {
             target: target.map(str::to_string),
             force,
+            from_session: false,
+            wait: None,
             json,
         }
     }
@@ -295,6 +347,51 @@ mod tests {
         for args in [&[][..], &["-h"], &["--help"], &["help"]] {
             assert_eq!(parse(args), Invocation::Help(None), "{args:?}");
         }
+    }
+
+    #[test]
+    fn sleep_takes_from_session_and_an_optional_wait() {
+        let full = |wait, from_session| Invocation::Sleep {
+            target: Some("w1:p2".into()),
+            force: false,
+            from_session,
+            wait,
+            json: false,
+        };
+        assert_eq!(
+            parse(&["sleep", "w1:p2", "--from-session"]),
+            full(None, true)
+        );
+        assert_eq!(parse(&["sleep", "--wait", "w1:p2"]), full(Some(120), false));
+        assert_eq!(
+            parse(&["sleep", "w1:p2", "--wait=45"]),
+            full(Some(45), false)
+        );
+        for bad in ["--wait=0", "--wait=x", "--wait="] {
+            assert!(usage(&["sleep", bad]).contains("--wait expects"), "{bad}");
+        }
+        // After `--`, a target may look like the option.
+        assert_eq!(
+            parse(&["sleep", "--", "--wait"]),
+            Invocation::Sleep {
+                target: Some("--wait".into()),
+                force: false,
+                from_session: false,
+                wait: None,
+                json: false,
+            }
+        );
+    }
+
+    #[test]
+    fn sweep_takes_now() {
+        assert_eq!(
+            parse(&["sweep", "--now", "--json"]),
+            Invocation::Sweep {
+                now: true,
+                json: true
+            }
+        );
     }
 
     #[test]
@@ -431,10 +528,19 @@ mod tests {
             parse(&["status", "--json"]),
             Invocation::Status { json: true }
         );
-        assert_eq!(parse(&["sweep"]), Invocation::Sweep { json: false });
+        assert_eq!(
+            parse(&["sweep"]),
+            Invocation::Sweep {
+                now: false,
+                json: false
+            }
+        );
         assert_eq!(
             parse(&["sweep", "--json"]),
-            Invocation::Sweep { json: true }
+            Invocation::Sweep {
+                now: false,
+                json: true
+            }
         );
         assert_eq!(parse(&["config"]), Invocation::Config { json: false });
         assert_eq!(

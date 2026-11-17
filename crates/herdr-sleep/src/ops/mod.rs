@@ -18,10 +18,12 @@ pub use event::{ActionContext, EventOutcome, FocusEvent, FocusKind, handle_focus
 pub use markers::{MarkerReport, MarkersState, resync_markers, sync_markers};
 pub use registry::{Registry, Sleeper};
 pub use replay::{ReplayArgs, ReplayOutcome, replay};
-pub use restore::{RestoreReport, restore};
-pub use sleep::{PlaceholderParams, SleepOutcome, placeholder_argv, sleep_agent};
+pub use restore::{RestoreReport, restore, sleep_saved_session};
+pub use sleep::{
+    PlaceholderParams, SleepOutcome, placeholder_argv, sleep_agent, sleep_agent_waiting,
+};
 pub use sweep::{
-    AgentClock, MAX_SLEEPS_PER_SWEEP, SweepReport, SweepState, is_focused, signature, sweep_once,
-    sweep_with_mode,
+    AgentClock, MAX_SLEEPS_PER_SWEEP, SweepReport, SweepState, is_focused, signature, sweep_now,
+    sweep_once, sweep_with_mode,
 };
 pub use wake::{WakeOptions, WakeOutcome, wake_agent};

@@ -10,8 +10,8 @@ on demand, keeping their pane, name and session.
 
 Commands:
   watch [--detach]            Run the watcher that sweeps on a timer
-  sweep [--json]              Put to sleep every agent idle long enough, now
-  sleep [<pane|name>] [--force] [--json]
+  sweep [--now] [--json]      Put to sleep every agent idle long enough, now
+  sleep [<pane|name>] [--force] [--from-session] [--wait[=SECONDS]] [--json]
                               Put one agent to sleep
   wake [<pane|name>] [--no-wait] [--json]
                               Wake one sleeping agent
@@ -19,7 +19,7 @@ Commands:
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running
-  restore [--json]            Bring sleeping panes back after a Herdr restart
+  restore [--json]            Put panes back to sleep after a Herdr restart
 
 Run 'herdr-sleep <command> --help' for the options of a command.
 Without a pane or name, sleep and wake act on the pane of the Herdr action
@@ -41,16 +41,27 @@ Files:
 ";
 
 const SLEEP: &str = "\
-Usage: herdr-sleep sleep [<pane|name>] [--force] [--json] [--]
+Usage: herdr-sleep sleep [<pane|name>] [--force] [--from-session] [--wait[=SECONDS]] [--json] [--]
 
 Put an agent to sleep: it quits through its own exit command and its pane
-keeps a Placeholder. The safety guards apply.
+keeps a Placeholder. The safety guards apply. A refusal is printed on stderr
+with what to try next.
+
+A pane with no live agent but a saved session (what a Herdr restart leaves
+for an agent that was awake) is handled too: its agent is started again with
+its session, then put to sleep. The pane must be given by id.
 
 Without a pane or name the pane of the Herdr action context is used
 (HERDR_PLUGIN_CONTEXT_JSON pane_id, then focused_pane_id, then HERDR_PANE_ID).
 
 Options:
   --force     Skip the guards (use with care)
+  --from-session
+              The pane has no live agent: resume its saved session, then put
+              it to sleep. Fails when an agent is running there
+  --wait[=SECONDS]
+              Keep trying while the agent is not idle yet or shows no prompt
+              (default 120 seconds)
   --json      Print one JSON object instead of a line:
               pane, name, outcome (asleep, refused, dry-run, aborted, warned),
               slept (bool), freed_kb (number or null), reason (string or null)
@@ -104,11 +115,14 @@ Exit codes:
 ";
 
 const SWEEP: &str = "\
-Usage: herdr-sleep sweep [--json]
+Usage: herdr-sleep sweep [--now] [--json]
 
 Run one sweep now: put to sleep every agent idle for sleep_after_minutes.
 
 Options:
+  --now       Do not wait for sleep_after_minutes, and do not stop at three
+              agents: every settled, unfocused agent is considered. The other
+              guards still apply
   --json      Print the report as one JSON object instead of lines:
               considered (number), slept (panes), refused (array of
               [pane, code]), aborted (array of [pane, reason]), dry_run
@@ -174,16 +188,20 @@ Exit codes:
 const RESTORE: &str = "\
 Usage: herdr-sleep restore [--json]
 
-Command of the startup hook. After a Herdr restart, put the Placeholder
-back in every pane that was asleep before it: the pane must still exist,
-run no agent and sit at its shell prompt. Panes that do not qualify are
-left alone and the reason goes to the journal. Then make sure the watcher
-runs. Always exits 0 unless the command line is wrong.
+Command of the startup hook, also safe to run by hand. After a Herdr restart,
+put every pane back to sleep that was asleep before it (it gets its
+Placeholder) or that Herdr holds a saved session for (its agent is started
+again with its session, one at a time, then put to sleep). The pane must
+still exist, run no agent, sit at its shell prompt and have its working
+directory. A pane that is not ready in time gets a second chance after the
+others, waiting restore_settle_timeout_seconds each time. Panes whose working
+directory is gone are listed apart. Then make sure the watcher runs. Always
+exits 0 unless the command line is wrong.
 
 Options:
   --json      Print one JSON object instead of lines:
               restored (panes), skipped (array of [pane, reason]),
-              error (string or null)
+              missing_cwd (array of [pane, directory]), error (string or null)
 
 Exit codes:
   0  the pass ran, or could not run (the journal says why)
@@ -264,8 +282,8 @@ on demand, keeping their pane, name and session.
 
 Commands:
   watch [--detach]            Run the watcher that sweeps on a timer
-  sweep [--json]              Put to sleep every agent idle long enough, now
-  sleep [<pane|name>] [--force] [--json]
+  sweep [--now] [--json]      Put to sleep every agent idle long enough, now
+  sleep [<pane|name>] [--force] [--from-session] [--wait[=SECONDS]] [--json]
                               Put one agent to sleep
   wake [<pane|name>] [--no-wait] [--json]
                               Wake one sleeping agent
@@ -273,7 +291,7 @@ Commands:
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running
-  restore [--json]            Bring sleeping panes back after a Herdr restart
+  restore [--json]            Put panes back to sleep after a Herdr restart
 
 Run 'herdr-sleep <command> --help' for the options of a command.
 Without a pane or name, sleep and wake act on the pane of the Herdr action

@@ -11,13 +11,13 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use herdr_sleep::config::Config;
-use herdr_sleep::guards::SleepMode;
+use herdr_sleep::guards::{Refusal, SleepMode};
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
     ActionContext, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, RestoreReport, SleepOutcome,
     SweepReport, SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent,
-    sweep_once, wake_agent,
+    sleep_agent_waiting, sleep_saved_session, sweep_now, sweep_once, wake_agent,
 };
 use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
@@ -65,35 +65,124 @@ fn target_or_usage(command: &str, target: Option<&str>) -> Result<String, ExitCo
     })
 }
 
-/// Run `herdr-sleep sleep [<pane|name>] [--force] [--json]`.
-pub fn sleep(target: Option<&str>, force: bool, json: bool) -> ExitCode {
+/// Run `herdr-sleep sleep [<pane|name>] [--force] [--from-session]
+/// [--wait[=SECONDS]] [--json]`.
+pub fn sleep(
+    target: Option<&str>,
+    force: bool,
+    from_session: bool,
+    wait: Option<u64>,
+    json: bool,
+) -> ExitCode {
     let target = match target_or_usage("sleep", target) {
         Ok(target) => target,
         Err(code) => return code,
     };
     watcher::ensure_watcher_logged();
     let client = HerdrClient::from_env();
-    let agent = match client.agent_get(&target) {
-        Ok(agent) => agent,
-        Err(error) => return fail(format!("cannot find agent '{target}': {error}")),
-    };
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) => return fail(error),
     };
-    let mode = if force {
-        SleepMode::Force
-    } else {
-        SleepMode::Manual
+    let env = LiveEnv::new(client.clone());
+    let agent = client.agent_get(&target);
+    let (label, outcome) = match agent {
+        Ok(agent) if from_session => {
+            return fail(format!(
+                "{target} holds a live {} agent: use `sleep` without --from-session",
+                agent.kind().unwrap_or("unknown")
+            ));
+        }
+        Ok(agent) => {
+            let mode = if force {
+                SleepMode::Force
+            } else {
+                SleepMode::Manual
+            };
+            let outcome = match wait {
+                Some(seconds) => sleep_agent_waiting(
+                    &env,
+                    &config,
+                    &agent,
+                    mode,
+                    std::time::Duration::from_secs(seconds),
+                ),
+                None => sleep_agent(&env, &config, &agent, mode, None),
+            };
+            let label = agent.name.clone().unwrap_or_else(|| agent.pane_id.clone());
+            if json {
+                emit(&sleep_json(&agent, &outcome).to_string());
+                return exit_code(&outcome);
+            }
+            (label, outcome)
+        }
+        Err(agent_error) => match client.pane_get(&target) {
+            Ok(pane) if pane.agent_session.is_some() && !pane.has_agent() => {
+                eprintln!(
+                    "herdr-sleep: {target} has no live agent: resuming its saved session, then putting it to sleep"
+                );
+                let outcome = sleep_saved_session(&env, &config, &pane.pane_id);
+                if json {
+                    let shell = Agent {
+                        pane_id: pane.pane_id.clone(),
+                        name: pane.name.clone(),
+                        ..Agent::default()
+                    };
+                    emit(&sleep_json(&shell, &outcome).to_string());
+                    return exit_code(&outcome);
+                }
+                let label = pane.name.unwrap_or_else(|| pane.pane_id.clone());
+                (label, outcome)
+            }
+            Ok(pane) => {
+                return fail(format!(
+                    "{target} is pane {} with no agent and no saved session: nothing to put to sleep",
+                    pane.pane_id
+                ));
+            }
+            Err(_) => {
+                return fail(format!(
+                    "no agent or pane '{target}' ({agent_error}); give a pane id or the name of a live agent"
+                ));
+            }
+        },
     };
-    let outcome = sleep_agent(&LiveEnv::new(client), &config, &agent, mode, None);
-    if json {
-        emit(&sleep_json(&agent, &outcome).to_string());
-    } else {
-        let label = agent.name.as_deref().unwrap_or(&agent.pane_id);
-        emit(&describe(label, &outcome));
-    }
+    report_sleep(&label, &outcome, wait.is_some());
     exit_code(&outcome)
+}
+
+/// Print the outcome: success on stdout, a refusal or failure on stderr
+/// with what to try next.
+fn report_sleep(label: &str, outcome: &SleepOutcome, waited: bool) {
+    let line = describe(label, outcome);
+    match outcome {
+        SleepOutcome::Asleep { .. } | SleepOutcome::DryRun => emit(&line),
+        _ => {
+            eprintln!("herdr-sleep: {line}");
+            if let Some(hint) = sleep_hint(outcome, waited) {
+                eprintln!("herdr-sleep: {hint}");
+            }
+        }
+    }
+}
+
+/// What to try after a Sleep that did not happen.
+pub fn sleep_hint(outcome: &SleepOutcome, waited: bool) -> Option<&'static str> {
+    let SleepOutcome::Skipped(refusal) = outcome else {
+        return None;
+    };
+    match refusal {
+        Refusal::NotManaged => None,
+        Refusal::NotSettled(_) if !waited => Some(
+            "the agent is not idle yet: retry with --wait to keep trying, or use --force to skip the guards",
+        ),
+        Refusal::NoSession | Refusal::NoConversation | Refusal::PromptNotDetected if !waited => {
+            Some(
+                "the agent may have just started: retry with --wait, or use --force to skip the guards",
+            )
+        }
+        _ => Some("use --force to skip the guards"),
+    }
 }
 
 /// Run `herdr-sleep wake [<pane|name>] [--no-wait] [--json]`.
@@ -180,14 +269,25 @@ pub fn describe_restore(report: &RestoreReport) -> Vec<String> {
             .iter()
             .map(|(pane, reason)| format!("{pane} left alone: {reason}")),
     );
+    lines.extend(report.missing_cwd.iter().map(|(pane, cwd)| {
+        let cwd = if cwd.is_empty() { "unknown" } else { cwd };
+        format!("{pane} ignored: its working directory is gone ({cwd})")
+    }));
     if lines.is_empty() {
         lines.push("no sleeping pane to restore".to_string());
+    } else {
+        lines.push(format!(
+            "restore done: {} restored, {} left alone, {} with a missing working directory",
+            report.restored.len(),
+            report.skipped.len(),
+            report.missing_cwd.len()
+        ));
     }
     lines
 }
 
-/// Run `herdr-sleep sweep [--json]`: one Sweep in the foreground.
-pub fn sweep(json: bool) -> ExitCode {
+/// Run `herdr-sleep sweep [--now] [--json]`: one Sweep in the foreground.
+pub fn sweep(now: bool, json: bool) -> ExitCode {
     watcher::ensure_watcher_logged();
     let config = match Config::load() {
         Ok(config) => config,
@@ -197,7 +297,11 @@ pub fn sweep(json: bool) -> ExitCode {
     let mut state = herdr_sleep::ops::Env::state_dir(&env)
         .map(|dir| SweepState::load(&dir))
         .unwrap_or_default();
-    let report = sweep_once(&env, &config, &mut state);
+    let report = if now {
+        sweep_now(&env, &config, &mut state)
+    } else {
+        sweep_once(&env, &config, &mut state)
+    };
     if json {
         match serde_json::to_string(&report) {
             Ok(text) => emit(&text),
@@ -475,15 +579,41 @@ mod tests {
     }
 
     #[test]
+    fn hints_say_what_to_try_next() {
+        let busy = SleepOutcome::Skipped(Refusal::NotSettled(
+            herdr_sleep::herdr::AgentStatus::Working,
+        ));
+        assert!(sleep_hint(&busy, false).unwrap().contains("--wait"));
+        assert!(!sleep_hint(&busy, true).unwrap().contains("--wait"));
+        assert!(sleep_hint(&busy, true).unwrap().contains("--force"));
+        let draft = SleepOutcome::Skipped(Refusal::DraftInPrompt);
+        assert_eq!(
+            sleep_hint(&draft, false),
+            Some("use --force to skip the guards")
+        );
+        assert_eq!(
+            sleep_hint(&SleepOutcome::Skipped(Refusal::NotManaged), false),
+            None
+        );
+        assert_eq!(sleep_hint(&SleepOutcome::Aborted("x".into()), false), None);
+    }
+
+    #[test]
     fn restore_lines() {
         let report = RestoreReport {
             restored: vec!["p1".into()],
             skipped: vec![("p2".into(), "pane-busy".into())],
+            missing_cwd: vec![("p3".into(), "/gone".into())],
             error: None,
         };
         assert_eq!(
             describe_restore(&report),
-            ["p1 is asleep again", "p2 left alone: pane-busy"]
+            [
+                "p1 is asleep again",
+                "p2 left alone: pane-busy",
+                "p3 ignored: its working directory is gone (/gone)",
+                "restore done: 1 restored, 1 left alone, 1 with a missing working directory"
+            ]
         );
         assert_eq!(
             describe_restore(&RestoreReport::default()),

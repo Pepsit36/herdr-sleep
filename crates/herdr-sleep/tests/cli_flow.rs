@@ -224,7 +224,7 @@ fn sleep_falls_back_to_the_focused_pane_then_the_environment() {
         .output()
         .unwrap();
     assert!(
-        stdout(&focused).starts_with("w9:p8 was not put to sleep"),
+        stderr(&focused).starts_with("herdr-sleep: w9:p8 was not put to sleep"),
         "{focused:?}"
     );
     let env_only = sandbox
@@ -233,9 +233,12 @@ fn sleep_falls_back_to_the_focused_pane_then_the_environment() {
         .output()
         .unwrap();
     assert!(
-        stdout(&env_only).starts_with("w9:p9 was not put to sleep"),
+        stderr(&env_only).starts_with("herdr-sleep: w9:p9 was not put to sleep"),
         "{env_only:?}"
     );
+    // A refusal is an error: nothing on stdout, and a hint on stderr.
+    assert!(focused.stdout.is_empty(), "{focused:?}");
+    assert!(stderr(&focused).contains("--wait"), "{focused:?}");
 }
 
 #[test]
