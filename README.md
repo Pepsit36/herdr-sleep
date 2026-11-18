@@ -133,6 +133,13 @@ sweep_interval_seconds = 60
 # and for Herdr to release the agent's identity (5 to 600).
 restore_settle_timeout_seconds = 60
 
+# Prompt detection. The prompt is looked for between the last two rules of the screen (lines
+# matching prompt_frame_regex), whatever sits above or below them, such as a tall status bar.
+# Without such a frame the last prompt_area_lines rows are searched (5 to 40). An empty
+# prompt_frame_regex turns the frame detection off. Both can be set per agent too.
+prompt_area_lines = 15
+prompt_frame_regex = '^\s*\u{2500}[\u{2500}\s]{9,}$'   # a line of at least ten "─"
+
 # Agents. Built in: claude, codex, cursor, gemini. A table overrides fields of a built-in
 # or adds an agent; a new agent needs all four keys.
 [agents.myagent]
@@ -140,6 +147,8 @@ bin = "myagent"             # process name
 exit = "/quit"              # typed to make it quit
 resume = ["--resume", "{sid}"]
 prompt_regex = "^\\s*>"     # marks the input line, used to detect a draft and readiness
+# prompt_area_lines = 20     # optional, overrides the global value for this agent
+# prompt_frame_regex = ""    # optional, "" turns the frame detection off for this agent
 ```
 
 The configuration is re-read on every sweep.
@@ -174,7 +183,10 @@ is replayed into the agent once it is ready.
 - **An agent never sleeps.** `herdr-sleep status` shows the last refusal per agent: `draft-in-prompt`
   (text typed at the prompt), `busy-children` (a child process is running; add it to
   `ignore_child_regex` if it is harmless), `prompt-not-detected` (the screen shows no prompt that
-  matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess),
+  matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess; the prompt
+  is searched between the last two rules of the screen (`prompt_frame_regex`) and, without a frame,
+  in the last `prompt_area_lines` rows: raise `prompt_area_lines` or adapt `prompt_frame_regex` when
+  your agent draws its prompt differently),
   `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
   first message: it could not be resumed, so the agent is left alone and retried later), and so on.
 - **An agent stays awake on purpose.** `excluded-name-regex`, `excluded-screen-regex` and

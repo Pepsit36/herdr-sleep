@@ -18,10 +18,13 @@ use crate::herdr::client::{HerdrClient, ReadFormat};
 use crate::herdr::model::{Agent, AgentStatus, ProcessInfo};
 use crate::procs::{self, ProcessTable};
 
-/// Number of screen rows read to analyse the prompt.
+/// Number of screen rows read to analyse the prompt. It is at least the largest
+/// `prompt_area_lines` the configuration accepts, and `wake` reads the same
+/// number of rows.
 pub const SCREEN_LINES: usize = 40;
-/// Only this many rows at the bottom of the screen are searched for the prompt.
-const PROMPT_AREA_LINES: usize = 15;
+/// Only this many rows at the bottom of the screen are searched for a text
+/// that excludes the agent from sleep.
+const EXCLUDE_SCREEN_LINES: usize = 15;
 /// Longest command shown for a busy child.
 const COMMAND_MAX_CHARS: usize = 80;
 /// Busy children listed in a refusal.
@@ -135,7 +138,9 @@ impl fmt::Display for Refusal {
                 }
                 Ok(())
             }
-            Refusal::PromptNotDetected => f.write_str("prompt not detected on screen"),
+            Refusal::PromptNotDetected => f.write_str(
+                "prompt not detected on screen (see prompt_area_lines and prompt_frame_regex)",
+            ),
             Refusal::DraftInPrompt => f.write_str("text is typed in the prompt"),
         }
     }
@@ -344,7 +349,7 @@ fn excluded_command<'t>(config: &Config, table: &'t ProcessTable, pid: i32) -> O
         .find(|command| config.cmdline_excluded(command))
 }
 
-/// The first of the last [`PROMPT_AREA_LINES`] screen lines, without colours,
+/// The first of the last [`EXCLUDE_SCREEN_LINES`] screen lines, without colours,
 /// that matches `exclude_screen_regex`. The screen is only read when the list
 /// is not empty.
 fn excluded_screen_line(ctx: &GuardContext<'_>) -> Option<String> {
@@ -353,7 +358,7 @@ fn excluded_screen_line(ctx: &GuardContext<'_>) -> Option<String> {
     }
     let screen = ctx.probe.screen()?;
     let lines: Vec<&str> = screen.split('\n').collect();
-    let start = lines.len().saturating_sub(PROMPT_AREA_LINES);
+    let start = lines.len().saturating_sub(EXCLUDE_SCREEN_LINES);
     lines[start..]
         .iter()
         .map(|line| {
@@ -395,7 +400,7 @@ fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
 /// What the agent's input line holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptState {
-    /// No line of the bottom area matches the Profile's `prompt_regex`.
+    /// No line of the prompt zone matches the Profile's `prompt_regex`.
     NotFound,
     /// The prompt is there and nothing (or only a grey suggestion) is typed.
     Empty,
@@ -409,17 +414,43 @@ pub fn is_ready_screen(screen_ansi: &str, profile: &Profile) -> bool {
 }
 
 /// Analyse the prompt of an ANSI screen (see [`PromptState`]).
+///
+/// The prompt is looked for between the last two rules (`prompt_frame_regex`)
+/// of the screen, so a tall status bar below it and the earlier messages above
+/// it do not matter: a frame without a prompt inside is not a prompt. Without
+/// a frame (two rules), the last `prompt_area_lines` rows are searched.
 pub fn prompt_state(screen_ansi: &str, profile: &Profile) -> PromptState {
     let lines: Vec<&str> = screen_ansi
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .collect();
-    let start = lines.len().saturating_sub(PROMPT_AREA_LINES);
-    lines[start..]
-        .iter()
-        .rev()
-        .find_map(|line| line_state(line, &profile.prompt_regex))
-        .unwrap_or(PromptState::NotFound)
+    let in_zone = |zone: &[&str]| {
+        zone.iter()
+            .rev()
+            .find_map(|line| line_state(line, &profile.prompt_regex))
+    };
+    let area = match framed_zone(&lines, profile) {
+        Some(zone) => zone,
+        None => &lines[lines.len().saturating_sub(profile.prompt_area_lines)..],
+    };
+    in_zone(area).unwrap_or(PromptState::NotFound)
+}
+
+/// The lines between the last two rules of the screen. A rule that a narrow
+/// pane wraps onto several rows counts once.
+fn framed_zone<'a, 'l>(lines: &'a [&'l str], profile: &Profile) -> Option<&'a [&'l str]> {
+    let frame = profile.prompt_frame_regex.as_ref()?;
+    let is_rule = |line: &str| {
+        let plain: String = parse_cells(line).iter().map(|c| c.ch).collect();
+        frame.is_match(&plain)
+    };
+    // The first row of the lowest rule, then the last row of the one above.
+    let mut lower = lines.iter().rposition(|line| is_rule(line))?;
+    while lower > 0 && is_rule(lines[lower - 1]) {
+        lower -= 1;
+    }
+    let upper = lines[..lower].iter().rposition(|line| is_rule(line))?;
+    Some(&lines[upper + 1..lower])
 }
 
 /// One visible character and whether it is drawn dim or grey.
@@ -533,6 +564,7 @@ fn apply_sgr(params: &str, faint: &mut bool, grey: &mut bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_PROMPT_AREA_LINES;
     use crate::procs::ProcessTable;
     use regex::RegexBuilder;
     use std::collections::HashMap;
@@ -636,13 +668,143 @@ mod tests {
     #[test]
     fn prompt_above_the_bottom_area_is_ignored() {
         let mut screen = String::from("\u{276F}\u{a0}\n");
-        screen.push_str(&"output\n".repeat(PROMPT_AREA_LINES));
+        screen.push_str(&"output\n".repeat(DEFAULT_PROMPT_AREA_LINES));
         assert_eq!(state(&screen, "claude"), PromptState::NotFound);
         let near = format!(
             "\u{276F}\u{a0}\n{}",
-            "output\n".repeat(PROMPT_AREA_LINES - 2)
+            "output\n".repeat(DEFAULT_PROMPT_AREA_LINES - 2)
         );
         assert_eq!(state(&near, "claude"), PromptState::Empty);
+    }
+
+    // ---- prompt frame ---------------------------------------------------
+
+    const WIDE_RULE: &str = "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}";
+
+    /// A 40-row Claude Code screen: history, the framed prompt on row 25 and a
+    /// 14-row status bar below it (16 rows from the bottom).
+    fn tall_screen(prompt_line: &str, history_prompt: bool) -> String {
+        let mut rows: Vec<String> = (1..=8).map(|n| format!("  output {n}")).collect();
+        rows.push(if history_prompt {
+            "\u{276F} yes check".into()
+        } else {
+            "  yes check".into()
+        });
+        rows.extend((10..=23).map(|n| format!("  reply {n}")));
+        rows.push(format!("\\e[38;2;136;136;136m{WIDE_RULE}\\e[0m"));
+        rows.push(prompt_line.to_string());
+        rows.push(format!("\\e[38;2;136;136;136m{WIDE_RULE}\\e[0m"));
+        rows.extend((27..=39).map(|n| format!("  status {n}")));
+        rows.push("  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)".into());
+        assert_eq!(rows.len(), 40);
+        esc(&rows.join("\r\n"))
+    }
+
+    const EMPTY_PROMPT: &str = "\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0m";
+
+    fn without_frame(kind: &str) -> Profile {
+        Profile {
+            prompt_frame_regex: None,
+            ..profile(kind)
+        }
+    }
+
+    #[test]
+    fn a_framed_prompt_is_found_below_the_default_window() {
+        let screen = tall_screen(EMPTY_PROMPT, true);
+        assert_eq!(
+            prompt_state(&screen, &profile("claude")),
+            PromptState::Empty
+        );
+        assert!(is_ready_screen(&screen, &profile("claude")));
+        // Without the frame detection the prompt is 16 rows from the bottom.
+        assert_eq!(
+            prompt_state(&screen, &without_frame("claude")),
+            PromptState::NotFound
+        );
+        // A wider window finds it too.
+        let wide = Profile {
+            prompt_area_lines: 20,
+            ..without_frame("claude")
+        };
+        assert_eq!(prompt_state(&screen, &wide), PromptState::Empty);
+    }
+
+    #[test]
+    fn a_framed_draft_is_a_draft() {
+        let screen = tall_screen("\\e[0m\u{276F}\u{a0}texte", true);
+        assert_eq!(
+            prompt_state(&screen, &profile("claude")),
+            PromptState::Draft
+        );
+    }
+
+    #[test]
+    fn prompts_in_the_history_above_the_frame_are_ignored() {
+        // The framed prompt is empty although the history holds typed messages.
+        let screen = tall_screen(EMPTY_PROMPT, true);
+        assert_eq!(
+            prompt_state(&screen, &profile("claude")),
+            PromptState::Empty
+        );
+        // A frame with no prompt inside is not a prompt, whatever the history says.
+        let screen = tall_screen("  thinking...", true);
+        assert_eq!(
+            prompt_state(&screen, &profile("claude")),
+            PromptState::NotFound
+        );
+    }
+
+    #[test]
+    fn a_rule_wrapped_by_a_narrow_pane_counts_once() {
+        let wrapped = format!(
+            "{}\r\n{}\r\n\u{276F}\u{a0}\r\n{}\r\n{}\r\nstatus",
+            "\u{2500}".repeat(40),
+            "\u{2500}".repeat(20),
+            "\u{2500}".repeat(40),
+            "\u{2500}".repeat(20),
+        );
+        assert_eq!(
+            prompt_state(&wrapped, &profile("claude")),
+            PromptState::Empty
+        );
+        // Only one rule is left: the last rows are searched.
+        let lone = format!("{0}\r\n{0}\r\n\u{276F}\u{a0}", "\u{2500}".repeat(40));
+        assert_eq!(prompt_state(&lone, &profile("claude")), PromptState::Empty);
+    }
+
+    #[test]
+    fn without_two_rules_the_last_rows_are_searched() {
+        // Short rules (under ten characters) are not a frame.
+        let screen = claude_screen("\\e[0m\\e[38;2;153;153;153m\u{276F}\u{a0}\\e[0m");
+        assert_eq!(
+            prompt_state(&esc(&screen), &profile("claude")),
+            PromptState::Empty
+        );
+        // A single wide rule is not a frame either.
+        let one = format!("old\r\n{WIDE_RULE}\r\n\u{276F}\u{a0}\r\nstatus");
+        assert_eq!(prompt_state(&one, &profile("claude")), PromptState::Empty);
+    }
+
+    #[test]
+    fn other_agents_fall_back_without_a_frame() {
+        // Codex draws no rule: the last rows still decide.
+        assert_eq!(state("\u{203A} \n  gpt-5", "codex"), PromptState::Empty);
+        let framed = format!("{WIDE_RULE}\r\n\u{203A} fix bug\r\n{WIDE_RULE}\r\n  status");
+        assert_eq!(prompt_state(&framed, &profile("codex")), PromptState::Draft);
+    }
+
+    #[test]
+    fn the_prompt_area_of_a_profile_sets_the_fallback_window() {
+        let narrow = Profile {
+            prompt_area_lines: 5,
+            ..without_frame("claude")
+        };
+        let near = format!("\u{276F}\u{a0}\n{}", "output\n".repeat(3));
+        assert_eq!(prompt_state(&near, &narrow), PromptState::Empty);
+        let far = format!("\u{276F}\u{a0}\n{}", "output\n".repeat(5));
+        assert_eq!(prompt_state(&far, &narrow), PromptState::NotFound);
+        assert_eq!(DEFAULT_PROMPT_AREA_LINES, 15);
     }
 
     #[test]
@@ -989,7 +1151,7 @@ mod tests {
         // A match above the last lines is stale text and is ignored.
         let old = format!(
             "waiting for approval\n{}{}",
-            "output\n".repeat(PROMPT_AREA_LINES),
+            "output\n".repeat(EXCLUDE_SCREEN_LINES),
             empty_screen()
         );
         assert_eq!(

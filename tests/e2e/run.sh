@@ -46,6 +46,7 @@ note() { echo "        $*"; }
 # Environment of one scenario
 # ---------------------------------------------------------------------------
 
+AGENT_PREFIX="" # environment the fake agent is started with, for example "FAKE_AGENT_STATUS_LINES=16 "
 ROOT=""
 SERVER_LOG=""
 STATE_DIR=""  # plugin state dir: the journal lives here
@@ -146,7 +147,7 @@ attach_client() {
 # start_agent <pane> <name>: run the fake claude there, wait until Herdr sees it idle, name it.
 start_agent() {
   local pane="$1" name="$2"
-  herdr pane run "$pane" claude >/dev/null 2>&1
+  herdr pane run "$pane" "${AGENT_PREFIX}claude" >/dev/null 2>&1
   local ready=steady_idle
   # With sleep_after_minutes = 0 the Watcher would put the agent to sleep during the steady wait.
   [ "$QUICK" = 1 ] && ready=is_awake_idle
@@ -417,6 +418,7 @@ s9_restart_with_an_awake_agent() {
   if wait_for 90 is_asleep "$PANE_A"; then ok "alpha (registered) is sleeping-claude again"; else bad "alpha is kind='$(agent_kind "$PANE_A")' after the restart"; fi
   if wait_for 90 is_asleep "$second"; then ok "beta (never put to sleep) is sleeping-claude after the restart"; else
     bad "beta is kind='$(agent_kind "$second")' status='$(agent_status "$second")' after the restart"
+    herdr pane read "$second" --lines 40 --format ansi 2>&1 | cat -v | sed "s/^/        screen| /"
     note "pane: $(herdr pane get "$second" 2>&1 | head -c 500)"
     note "journal: $(tail -n 6 "$STATE_DIR/herdr-sleep.log" 2>/dev/null | tr '\n' '|')"
     return
@@ -482,6 +484,24 @@ exclude_cmdline_regex = ["claude"]'
   if wait_for 40 is_asleep "$PANE_A"; then ok "sleep --force ignores the exclusions"; else bad "alpha is '$(agent_kind "$PANE_A")' after sleep --force"; fi
 }
 
+s12_tall_status_bar() {
+  AGENT_PREFIX="FAKE_AGENT_STATUS_LINES=16 "
+  new_world "$CONFIG_MANUAL" || return
+  AGENT_PREFIX=""
+  local out rc
+  # The prompt is 17 rows from the bottom: only its frame finds it. Without the frame
+  # detection the fallback window misses it and the refusal names both settings.
+  printf '%s\n' "$CONFIG_MANUAL" 'prompt_frame_regex = ""' >"$CONFIG_DIR/config.toml"
+  out="$(hs sleep alpha 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" == *"prompt not detected"* && "$out" == *prompt_area_lines* && "$out" == *prompt_frame_regex* ]]; then ok "no frame detection: prompt-not-detected names both settings"; else bad "rc=$rc stderr='$out'"; fi
+  printf '%s\n' "$CONFIG_MANUAL" >"$CONFIG_DIR/config.toml"
+  hs sleep alpha >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "the framed prompt is found under a tall status bar"; else bad "alpha is '$(agent_kind "$PANE_A")' (stderr: $(hs sleep alpha 2>&1 >/dev/null))"; fi
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes and is recognised as ready"; else bad "alpha is '$(agent_kind "$PANE_A")' after the wake"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -494,6 +514,7 @@ SCENARIOS=(
   "s9|restart with an awake agent (Saved session)|s9_restart_with_an_awake_agent"
   "s10|sweep --now and explicit sleep errors|s10_sweep_now_and_sleep_errors"
   "s11|exclusion regexes keep an agent awake|s11_exclusion_regexes"
+  "s12|prompt found under a tall status bar|s12_tall_status_bar"
 )
 
 # ---------------------------------------------------------------------------

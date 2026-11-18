@@ -14,6 +14,20 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-18
+
+<!-- stamped -->
+
+### Fixed
+
+- **Prompt detection:** an agent with a tall status bar under its prompt (about 16 rows with Claude
+  Code) no longer makes `sleep` and the sweep refuse with `prompt-not-detected`. The prompt is now
+  looked for between the last two horizontal rules of the screen, so the messages above it and the
+  status bar below it do not matter; the last rows of the screen are searched when no such frame is
+  drawn. `restore` and `wake` use the same detection. New optional settings `prompt_area_lines`
+  (5 to 40, default 15) and `prompt_frame_regex` (empty turns the frame detection off) apply to
+  every agent and can be set per agent. The refusal now names both settings.
+
 ## [0.3.1] - 2026-11-18
 
 <!-- stamped -->

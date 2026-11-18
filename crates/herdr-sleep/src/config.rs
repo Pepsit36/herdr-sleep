@@ -46,9 +46,15 @@ const MAX_PREVIEW_LINES: i64 = 200;
 const DEFAULT_SWEEP_INTERVAL_SECONDS: u64 = 60;
 const SWEEP_INTERVAL_RANGE: std::ops::RangeInclusive<i64> = 5..=3600;
 const DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS: u64 = 60;
+/// Default number of bottom screen rows searched for the prompt when no frame is found.
+pub const DEFAULT_PROMPT_AREA_LINES: usize = 15;
+const PROMPT_AREA_LINES_RANGE: std::ops::RangeInclusive<i64> = 5..=40;
+/// Default `prompt_frame_regex`: a horizontal rule of at least ten box-drawing dashes.
+pub const DEFAULT_PROMPT_FRAME_REGEX: &str = r"^\s*\u{2500}[\u{2500}\s]{9,}$";
+
 const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 19] = [
+const TOP_LEVEL_KEYS: [&str; 21] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
@@ -62,6 +68,8 @@ const TOP_LEVEL_KEYS: [&str; 19] = [
     "exclude_cwd_regex",
     "protect_env_vars",
     "ignore_child_regex",
+    "prompt_area_lines",
+    "prompt_frame_regex",
     "exclude_name_regex",
     "exclude_screen_regex",
     "exclude_cmdline_regex",
@@ -70,7 +78,14 @@ const TOP_LEVEL_KEYS: [&str; 19] = [
     "agents",
 ];
 
-const AGENT_KEYS: [&str; 4] = ["bin", "exit", "resume", "prompt_regex"];
+const AGENT_KEYS: [&str; 6] = [
+    "bin",
+    "exit",
+    "resume",
+    "prompt_regex",
+    "prompt_area_lines",
+    "prompt_frame_regex",
+];
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -185,6 +200,12 @@ pub struct Profile {
     /// Matches the agent's empty input line when it is at its prompt.
     #[serde(serialize_with = "ser_regex")]
     pub prompt_regex: Regex,
+    /// Rows at the bottom of the screen searched for the prompt when no frame is found.
+    pub prompt_area_lines: usize,
+    /// Matches a rule drawn above and below the input line; `None` turns the frame
+    /// detection off.
+    #[serde(serialize_with = "ser_opt_regex")]
+    pub prompt_frame_regex: Option<Regex>,
 }
 
 impl Profile {
@@ -277,6 +298,11 @@ pub struct Config {
     pub exclude_cmdline_regex: Vec<Regex>,
     pub sweep_interval_seconds: u64,
     pub restore_settle_timeout_seconds: u64,
+    /// Default of every Profile's `prompt_area_lines`.
+    pub prompt_area_lines: usize,
+    /// Default of every Profile's `prompt_frame_regex`.
+    #[serde(serialize_with = "ser_opt_regex")]
+    pub prompt_frame_regex: Option<Regex>,
     /// Managed Profiles by Kind: built-ins with overrides plus custom kinds.
     pub profiles: BTreeMap<String, Profile>,
     /// Non-fatal findings (unknown keys, unmanaged custom kinds).
@@ -285,6 +311,10 @@ pub struct Config {
 
 fn ser_regex<S: Serializer>(re: &Regex, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(re.as_str())
+}
+
+fn ser_opt_regex<S: Serializer>(re: &Option<Regex>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(re.as_ref().map_or("", Regex::as_str))
 }
 
 fn ser_regexes<S: Serializer>(res: &[Regex], s: S) -> Result<S::Ok, S::Error> {
@@ -310,6 +340,8 @@ struct RawConfig {
     exclude_name_regex: Option<Vec<String>>,
     exclude_screen_regex: Option<Vec<String>>,
     exclude_cmdline_regex: Option<Vec<String>>,
+    prompt_area_lines: Option<i64>,
+    prompt_frame_regex: Option<String>,
     sweep_interval_seconds: Option<i64>,
     restore_settle_timeout_seconds: Option<i64>,
     agents: BTreeMap<String, RawAgent>,
@@ -322,6 +354,38 @@ struct RawAgent {
     exit: Option<String>,
     resume: Option<Vec<String>>,
     prompt_regex: Option<String>,
+    prompt_area_lines: Option<i64>,
+    prompt_frame_regex: Option<String>,
+}
+
+/// The prompt detection settings every Profile starts from.
+struct PromptDefaults {
+    area_lines: usize,
+    frame_regex: Option<Regex>,
+}
+
+fn check_area_lines(key: &str, lines: i64) -> Result<usize, ConfigError> {
+    if PROMPT_AREA_LINES_RANGE.contains(&lines) {
+        Ok(lines as usize)
+    } else {
+        Err(ConfigError::key(
+            key,
+            format!(
+                "{lines} is out of range {}..={}",
+                PROMPT_AREA_LINES_RANGE.start(),
+                PROMPT_AREA_LINES_RANGE.end()
+            ),
+        ))
+    }
+}
+
+/// An empty pattern turns the frame detection off.
+fn compile_frame(key: &str, pattern: &str) -> Result<Option<Regex>, ConfigError> {
+    if pattern.is_empty() {
+        Ok(None)
+    } else {
+        compile(key, pattern).map(Some)
+    }
 }
 
 /// Compiles `pattern` case-insensitively, naming `key` on failure.
@@ -555,7 +619,21 @@ impl Config {
             &raw.exclude_cmdline_regex.unwrap_or_default(),
         )?;
 
-        let profiles = build_profiles(raw.agents, &mut warnings)?;
+        let prompt_area_lines = check_area_lines(
+            "prompt_area_lines",
+            raw.prompt_area_lines
+                .unwrap_or(DEFAULT_PROMPT_AREA_LINES as i64),
+        )?;
+        let prompt_frame_regex = match &raw.prompt_frame_regex {
+            Some(pattern) => compile_frame("prompt_frame_regex", pattern)?,
+            None => Some(compile("prompt_frame_regex", DEFAULT_PROMPT_FRAME_REGEX)?),
+        };
+        let defaults = PromptDefaults {
+            area_lines: prompt_area_lines,
+            frame_regex: prompt_frame_regex.clone(),
+        };
+
+        let profiles = build_profiles(raw.agents, &defaults, &mut warnings)?;
 
         Ok(Config {
             sleep_after_minutes: raw
@@ -578,6 +656,8 @@ impl Config {
             exclude_cmdline_regex,
             sweep_interval_seconds: sweep as u64,
             restore_settle_timeout_seconds: settle as u64,
+            prompt_area_lines,
+            prompt_frame_regex,
             profiles,
             warnings,
         })
@@ -718,6 +798,15 @@ impl Config {
 # ignored one), matches one of these regexes never sleep (case-insensitive).
 #exclude_cmdline_regex = []
 
+# Bottom screen rows searched for the prompt when no frame is found (5 to 40). Also settable
+# per agent kind: [agents.<kind>] prompt_area_lines.
+#prompt_area_lines = {DEFAULT_PROMPT_AREA_LINES}
+
+# A line matching this regex is a rule drawn above and below the prompt; the prompt is looked
+# for between the last two rules of the screen. Empty turns the frame detection off. Also
+# settable per agent kind.
+#prompt_frame_regex = '{DEFAULT_PROMPT_FRAME_REGEX}'
+
 # Per-kind profiles. A table overrides single fields of a built-in kind (claude,
 # codex, cursor, gemini) or defines a new kind, which needs all four fields.
 # [agents.myagent]
@@ -739,6 +828,7 @@ fn default_ignore_child_regex() -> Vec<Regex> {
 
 fn build_profiles(
     agents: BTreeMap<String, RawAgent>,
+    defaults: &PromptDefaults,
     warnings: &mut Vec<String>,
 ) -> Result<BTreeMap<String, Profile>, ConfigError> {
     let mut raws = agents;
@@ -762,6 +852,8 @@ fn build_profiles(
                 &key("prompt_regex"),
                 over.prompt_regex.as_deref().unwrap_or(b.prompt_regex),
             )?,
+            prompt_area_lines: prompt_area_lines(&key, over.prompt_area_lines, defaults)?,
+            prompt_frame_regex: prompt_frame_regex(&key, over.prompt_frame_regex, defaults)?,
         };
         profiles.insert(profile.kind.clone(), profile);
     }
@@ -788,6 +880,9 @@ fn build_profiles(
             .map(|p| compile(&key("prompt_regex"), p))
             .transpose()?;
 
+        let area_lines = prompt_area_lines(&key, over.prompt_area_lines, defaults)?;
+        let frame_regex = prompt_frame_regex(&key, over.prompt_frame_regex.clone(), defaults)?;
+
         let missing: Vec<&str> = [
             ("bin", bin.is_none()),
             ("exit", exit.is_none()),
@@ -808,6 +903,8 @@ fn build_profiles(
                     exit,
                     resume,
                     prompt_regex,
+                    prompt_area_lines: area_lines,
+                    prompt_frame_regex: frame_regex,
                 },
             );
         } else {
@@ -818,6 +915,28 @@ fn build_profiles(
         }
     }
     Ok(profiles)
+}
+
+fn prompt_area_lines(
+    key: &impl Fn(&str) -> String,
+    own: Option<i64>,
+    defaults: &PromptDefaults,
+) -> Result<usize, ConfigError> {
+    match own {
+        Some(lines) => check_area_lines(&key("prompt_area_lines"), lines),
+        None => Ok(defaults.area_lines),
+    }
+}
+
+fn prompt_frame_regex(
+    key: &impl Fn(&str) -> String,
+    own: Option<String>,
+    defaults: &PromptDefaults,
+) -> Result<Option<Regex>, ConfigError> {
+    match own {
+        Some(pattern) => compile_frame(&key("prompt_frame_regex"), &pattern),
+        None => Ok(defaults.frame_regex.clone()),
+    }
 }
 
 fn checked(
@@ -956,6 +1075,64 @@ exclude_names = ["b"]"#);
             let e = err(&format!(r#"{key} = ["ok", "("]"#));
             assert!(e.contains(key) && e.contains("`(`"), "{e}");
         }
+    }
+
+    #[test]
+    fn prompt_detection_defaults() {
+        let c = Config::default();
+        assert_eq!(c.prompt_area_lines, 15);
+        let frame = c.prompt_frame_regex.as_ref().unwrap();
+        assert!(frame.is_match(&"\u{2500}".repeat(20)));
+        assert!(frame.is_match(&format!("  {}  ", "\u{2500}".repeat(10))));
+        assert!(!frame.is_match(&"\u{2500}".repeat(9)));
+        assert!(!frame.is_match("\u{276F} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
+        assert!(!frame.is_match("          "));
+        let claude = c.profile("claude").unwrap();
+        assert_eq!(claude.prompt_area_lines, 15);
+        assert!(claude.prompt_frame_regex.is_some());
+    }
+
+    #[test]
+    fn prompt_detection_keys_are_global_with_per_profile_overrides() {
+        let c = cfg(r#"
+            prompt_area_lines = 30
+            prompt_frame_regex = "^=+$"
+            [agents.codex]
+            prompt_area_lines = 8
+            prompt_frame_regex = ""
+            [agents.mine]
+            bin = "m"
+            exit = "/q"
+            resume = ["-r", "{sid}"]
+            prompt_regex = "^>"
+        "#);
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.prompt_area_lines, 30);
+        let claude = c.profile("claude").unwrap();
+        assert_eq!(claude.prompt_area_lines, 30);
+        assert_eq!(claude.prompt_frame_regex.as_ref().unwrap().as_str(), "^=+$");
+        let codex = c.profile("codex").unwrap();
+        assert_eq!(codex.prompt_area_lines, 8);
+        assert!(codex.prompt_frame_regex.is_none());
+        assert_eq!(c.profile("mine").unwrap().prompt_area_lines, 30);
+        // An empty global pattern turns the detection off for every profile.
+        let off = cfg(r#"prompt_frame_regex = """#);
+        assert!(off.prompt_frame_regex.is_none());
+        assert!(off.profile("claude").unwrap().prompt_frame_regex.is_none());
+    }
+
+    #[test]
+    fn prompt_detection_keys_are_validated() {
+        for text in ["prompt_area_lines = 4", "prompt_area_lines = 41"] {
+            assert!(err(text).contains("prompt_area_lines"), "{text}");
+        }
+        assert_eq!(cfg("prompt_area_lines = 5").prompt_area_lines, 5);
+        assert_eq!(cfg("prompt_area_lines = 40").prompt_area_lines, 40);
+        assert!(err(r#"prompt_frame_regex = "(""#).contains("prompt_frame_regex"));
+        let e = err("[agents.claude]\nprompt_frame_regex = \"(\"\n");
+        assert!(e.contains("agents.claude.prompt_frame_regex"), "{e}");
+        let e = err("[agents.claude]\nprompt_area_lines = 99\n");
+        assert!(e.contains("agents.claude.prompt_area_lines"), "{e}");
     }
 
     #[test]
