@@ -52,6 +52,9 @@ pub enum Refusal {
     Focused,
     NotIncluded,
     Excluded,
+    NameExcluded(String),
+    ScreenExcluded(String),
+    CmdlineExcluded(String),
     CwdExcluded(String),
     AgentProcessNotFound,
     ProtectedEnv(String),
@@ -71,6 +74,9 @@ impl Refusal {
             Refusal::Focused => "focused",
             Refusal::NotIncluded => "not-included",
             Refusal::Excluded => "excluded",
+            Refusal::NameExcluded(_) => "excluded-name-regex",
+            Refusal::ScreenExcluded(_) => "excluded-screen-regex",
+            Refusal::CmdlineExcluded(_) => "excluded-cmdline-regex",
             Refusal::CwdExcluded(_) => "cwd-excluded",
             Refusal::AgentProcessNotFound => "agent-process-not-found",
             Refusal::ProtectedEnv(_) => "protected-env",
@@ -97,6 +103,15 @@ impl fmt::Display for Refusal {
             Refusal::Focused => f.write_str("agent is focused"),
             Refusal::NotIncluded => f.write_str("name is not in include_names"),
             Refusal::Excluded => f.write_str("name is in exclude_names"),
+            Refusal::NameExcluded(name) => {
+                write!(f, "name {name} matches exclude_name_regex")
+            }
+            Refusal::ScreenExcluded(line) => {
+                write!(f, "screen matches exclude_screen_regex: {line}")
+            }
+            Refusal::CmdlineExcluded(command) => {
+                write!(f, "command line matches exclude_cmdline_regex: {command}")
+            }
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
             Refusal::ProtectedEnv(var) => write!(f, "protected environment variable {var}"),
@@ -263,6 +278,13 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         .and_then(|info| procs::find_agent_process(info, ctx.table, &profile.bin))
         .ok_or(Refusal::AgentProcessNotFound)?;
 
+    if let Some(command) = excluded_command(config, ctx.table, pid) {
+        return Err(Refusal::CmdlineExcluded(shorten(command)));
+    }
+    if let Some(line) = excluded_screen_line(ctx) {
+        return Err(Refusal::ScreenExcluded(shorten(&line)));
+    }
+
     if let Some(environment) = ctx.probe.environment(pid) {
         if let Some(var) = config
             .protect_env_vars
@@ -286,7 +308,8 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
             first: busy
                 .iter()
                 .take(LISTED_CHILDREN)
-                .map(|command| command.chars().take(COMMAND_MAX_CHARS).collect())
+                .copied()
+                .map(shorten)
                 .collect(),
         });
     }
@@ -298,6 +321,44 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
     }
 }
 
+/// The first command line of the agent process or of any of its descendants
+/// (ignored children included) that matches `exclude_cmdline_regex`.
+fn excluded_command<'t>(config: &Config, table: &'t ProcessTable, pid: i32) -> Option<&'t str> {
+    if config.exclude_cmdline_regex.is_empty() {
+        return None;
+    }
+    table
+        .get(pid)
+        .into_iter()
+        .chain(table.descendants(pid))
+        .map(|entry| entry.command.as_str())
+        .find(|command| config.cmdline_excluded(command))
+}
+
+/// The first of the last [`PROMPT_AREA_LINES`] screen lines, without colours,
+/// that matches `exclude_screen_regex`. The screen is only read when the list
+/// is not empty.
+fn excluded_screen_line(ctx: &GuardContext<'_>) -> Option<String> {
+    if ctx.config.exclude_screen_regex.is_empty() {
+        return None;
+    }
+    let screen = ctx.probe.screen()?;
+    let lines: Vec<&str> = screen.split('\n').collect();
+    let start = lines.len().saturating_sub(PROMPT_AREA_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let plain: String = parse_cells(line).iter().map(|c| c.ch).collect();
+            plain.trim().to_string()
+        })
+        .find(|line| ctx.config.screen_excluded(line))
+}
+
+fn shorten(text: &str) -> String {
+    text.chars().take(COMMAND_MAX_CHARS).collect()
+}
+
 fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
     let name = agent.name.as_deref();
     let listed = |list: &[String]| name.is_some_and(|n| list.iter().any(|x| x == n));
@@ -306,6 +367,9 @@ fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
     }
     if listed(&config.exclude_names) {
         return Err(Refusal::Excluded);
+    }
+    if let Some(name) = name.filter(|n| config.name_excluded(n)) {
+        return Err(Refusal::NameExcluded(name.to_string()));
     }
     if let Some(cwd) = agent.effective_cwd() {
         if config.cwd_excluded(cwd) {
@@ -461,6 +525,7 @@ fn apply_sgr(params: &str, faint: &mut bool, grey: &mut bool) {
 mod tests {
     use super::*;
     use crate::procs::ProcessTable;
+    use regex::RegexBuilder;
     use std::collections::HashMap;
 
     /// Expand `\e` into a real escape byte.
@@ -853,6 +918,130 @@ mod tests {
     }
 
     #[test]
+    fn name_regex_excludes_case_insensitively() {
+        let mut c = config();
+        c.exclude_name_regex = vec![
+            RegexBuilder::new("^deploy")
+                .case_insensitive(true)
+                .build()
+                .unwrap(),
+        ];
+        let p = probe(&empty_screen());
+        let t = table(&[]);
+        let mut a = agent();
+        a.name = Some("Deploy-prod".into());
+        let r = run(&c, &a, &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::NameExcluded("Deploy-prod".into())));
+        assert_eq!(
+            run(&c, &a, &t, &p, SleepMode::Manual),
+            Err(Refusal::NameExcluded("Deploy-prod".into()))
+        );
+        assert_eq!(run(&c, &a, &t, &p, SleepMode::Force), Ok(()));
+        a.name = Some("redeploy".into());
+        assert_eq!(run(&c, &a, &t, &p, SleepMode::Sweep), Ok(()));
+        a.name = None;
+        assert_eq!(run(&c, &a, &t, &p, SleepMode::Sweep), Ok(()));
+    }
+
+    fn with_regex(set: impl FnOnce(&mut Config, Vec<Regex>), pattern: &str) -> Config {
+        let mut c = config();
+        set(
+            &mut c,
+            vec![
+                RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap(),
+            ],
+        );
+        c
+    }
+
+    #[test]
+    fn screen_regex_matches_the_last_lines_without_colours() {
+        let c = with_regex(|c, r| c.exclude_screen_regex = r, "waiting for approval");
+        let t = table(&[]);
+        let screen = format!(
+            "\\e[1mWaiting \\e[31mfor\\e[0m approval\r\n{}",
+            empty_screen()
+        );
+        let r = run(&c, &agent(), &t, &probe(&screen), SleepMode::Sweep);
+        assert_eq!(
+            r,
+            Err(Refusal::ScreenExcluded("Waiting for approval".into()))
+        );
+        assert_eq!(r.unwrap_err().code(), "excluded-screen-regex");
+        let p = probe(&empty_screen());
+        assert_eq!(run(&c, &agent(), &t, &p, SleepMode::Sweep), Ok(()));
+        assert_eq!(
+            run(&c, &agent(), &t, &probe(&screen), SleepMode::Force),
+            Ok(())
+        );
+        // A match above the last lines is stale text and is ignored.
+        let old = format!(
+            "waiting for approval\n{}{}",
+            "output\n".repeat(PROMPT_AREA_LINES),
+            empty_screen()
+        );
+        assert_eq!(
+            run(&c, &agent(), &t, &probe(&old), SleepMode::Sweep),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn screen_regex_wins_over_a_missing_prompt() {
+        let c = with_regex(|c, r| c.exclude_screen_regex = r, "running tests");
+        let p = probe("running tests\r\n");
+        let r = run(&c, &agent(), &table(&[]), &p, SleepMode::Manual);
+        assert_eq!(r.unwrap_err().code(), "excluded-screen-regex");
+    }
+
+    #[test]
+    fn the_screen_is_not_read_without_a_screen_regex() {
+        let mut p = probe(&empty_screen());
+        p.screen = None;
+        let c = with_regex(|c, r| c.exclude_cmdline_regex = r, "nomatch");
+        let r = run(&c, &agent(), &table(&[]), &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::PromptNotDetected));
+        let c = with_regex(|c, r| c.exclude_screen_regex = r, "x");
+        let r = run(&c, &agent(), &table(&[]), &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::PromptNotDetected));
+    }
+
+    #[test]
+    fn cmdline_regex_covers_the_agent_and_every_child() {
+        let c = with_regex(|c, r| c.exclude_cmdline_regex = r, "cargo (test|build)");
+        let p = probe(&empty_screen());
+        let r = run(
+            &c,
+            &agent(),
+            &table(&["Cargo TEST --all"]),
+            &p,
+            SleepMode::Sweep,
+        );
+        assert_eq!(r, Err(Refusal::CmdlineExcluded("Cargo TEST --all".into())));
+        assert_eq!(r.unwrap_err().code(), "excluded-cmdline-regex");
+        let t = table(&[]);
+        assert_eq!(run(&c, &agent(), &t, &p, SleepMode::Sweep), Ok(()));
+        // An ignored child still counts for the exclusion.
+        let ignored = table(&["node /opt/mcp-server/cargo build"]);
+        assert_eq!(
+            sweep(&agent(), &["node /opt/mcp-server/cargo build"], &p),
+            Ok(())
+        );
+        let r = run(&c, &agent(), &ignored, &p, SleepMode::Manual);
+        assert_eq!(r.unwrap_err().code(), "excluded-cmdline-regex");
+        let r = run(&c, &agent(), &ignored, &p, SleepMode::Force);
+        assert_eq!(r, Ok(()));
+        // The agent's own command line counts too.
+        let c = with_regex(|c, r| c.exclude_cmdline_regex = r, "--dangerously");
+        let own = ProcessTable::parse("50 1 100 -bash\n100 50 5000 claude --dangerously-skip\n");
+        let r = run(&c, &agent(), &own, &p, SleepMode::Sweep);
+        assert_eq!(r.unwrap_err().code(), "excluded-cmdline-regex");
+    }
+
+    #[test]
     fn cwd_excluded() {
         let mut c = config();
         c.exclude_cwd_regex = vec![Regex::new("/secret").unwrap()];
@@ -1000,6 +1189,12 @@ mod tests {
             (Refusal::Focused, "focused"),
             (Refusal::NotIncluded, "not-included"),
             (Refusal::Excluded, "excluded"),
+            (Refusal::NameExcluded("n".into()), "excluded-name-regex"),
+            (Refusal::ScreenExcluded("s".into()), "excluded-screen-regex"),
+            (
+                Refusal::CmdlineExcluded("c".into()),
+                "excluded-cmdline-regex",
+            ),
             (Refusal::CwdExcluded("/x".into()), "cwd-excluded"),
             (Refusal::AgentProcessNotFound, "agent-process-not-found"),
             (Refusal::ProtectedEnv("V".into()), "protected-env"),
