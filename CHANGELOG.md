@@ -14,6 +14,17 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-18
+
+<!-- stamped -->
+
+### Fixed
+
+- **Wake in fish:** waking a sleeping agent in a pane whose shell is fish no longer closes the pane.
+  fish rejected the wake script (`$?` is `$status` in fish) and exited before resuming anything; the
+  script is now written in the syntax of the pane's shell, and a shell the plugin does not know gets
+  a script with nothing shell-specific in it, at the price of no report when the resume fails.
+
 ## [0.3.0] - 2026-11-18
 
 <!-- stamped -->
