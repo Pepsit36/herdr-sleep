@@ -48,7 +48,7 @@ impl Harness {
             &format!("printf '%s\\n' \"$*\" >> '{}'", p("herdr.log").display()),
         );
         script(
-            &p("shell"),
+            &p("zsh"),
             &format!(
                 "{{ printf 'PWD=%s\\n' \"$PWD\"; \
                  for a in \"$@\"; do printf 'ARG=%s\\n' \"$a\"; done; }} > '{}'",
@@ -72,7 +72,7 @@ impl Harness {
             .arg("--herdr-bin")
             .arg(p("herdr"))
             .arg("--shell")
-            .arg(p("shell"))
+            .arg(p("zsh"))
             .arg("--cwd")
             .arg(&dir)
             .arg("--preview")
@@ -251,7 +251,7 @@ fn declares_shows_replays_and_hands_over() {
         "{script}"
     );
     assert!(
-        script.ends_with(&format!("; exec {} -l", h.path("shell").display())),
+        script.ends_with(&format!("; exec {} -l", h.path("zsh").display())),
         "{script}"
     );
 
