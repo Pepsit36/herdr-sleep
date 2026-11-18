@@ -418,6 +418,7 @@ s9_restart_with_an_awake_agent() {
   if wait_for 90 is_asleep "$PANE_A"; then ok "alpha (registered) is sleeping-claude again"; else bad "alpha is kind='$(agent_kind "$PANE_A")' after the restart"; fi
   if wait_for 90 is_asleep "$second"; then ok "beta (never put to sleep) is sleeping-claude after the restart"; else
     bad "beta is kind='$(agent_kind "$second")' status='$(agent_status "$second")' after the restart"
+    herdr pane read "$second" --lines 40 --format ansi 2>&1 | cat -v | sed "s/^/        screen| /"
     note "pane: $(herdr pane get "$second" 2>&1 | head -c 500)"
     note "journal: $(tail -n 6 "$STATE_DIR/herdr-sleep.log" 2>/dev/null | tr '\n' '|')"
     return
@@ -493,7 +494,7 @@ s12_tall_status_bar() {
   printf '%s\n' "$CONFIG_MANUAL" 'prompt_frame_regex = ""' >"$CONFIG_DIR/config.toml"
   out="$(hs sleep alpha 2>&1 >/dev/null)"
   rc=$?
-  if [ "$rc" = 1 ] && [[ "$out" == *prompt-not-detected* && "$out" == *prompt_area_lines* && "$out" == *prompt_frame_regex* ]]; then ok "no frame detection: prompt-not-detected names both settings"; else bad "rc=$rc stderr='$out'"; fi
+  if [ "$rc" = 1 ] && [[ "$out" == *"prompt not detected"* && "$out" == *prompt_area_lines* && "$out" == *prompt_frame_regex* ]]; then ok "no frame detection: prompt-not-detected names both settings"; else bad "rc=$rc stderr='$out'"; fi
   printf '%s\n' "$CONFIG_MANUAL" >"$CONFIG_DIR/config.toml"
   hs sleep alpha >/dev/null 2>&1
   if wait_for 40 is_asleep "$PANE_A"; then ok "the framed prompt is found under a tall status bar"; else bad "alpha is '$(agent_kind "$PANE_A")' (stderr: $(hs sleep alpha 2>&1 >/dev/null))"; fi
