@@ -4,7 +4,7 @@ members = ["crates/herdr-sleep", "crates/herdr-sleep-ph", "crates/xtask"]
 
 [workspace.package]
 # Never edit by hand: the release job computes the version and commits it (ADR 0007).
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
