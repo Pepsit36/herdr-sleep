@@ -29,8 +29,6 @@ pub const DEDUP_WINDOW: Duration = Duration::from_secs(15);
 pub const READY_POLL: Duration = Duration::from_millis(250);
 /// Longest wait for the Agent to be Ready.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
-/// Rows of the screen examined to recognise the prompt.
-const SCREEN_LINES: usize = 40;
 
 /// How a Wake is carried out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -140,7 +138,7 @@ pub fn is_ready(env: &dyn Env, pane: &str, kind: &str, config: &Config) -> bool 
     if !config.allows_status(agent.agent_status) {
         return false;
     }
-    env.screen_ansi(pane, SCREEN_LINES)
+    env.screen_ansi(pane, guards::SCREEN_LINES)
         .is_ok_and(|screen| guards::is_ready_screen(&screen, profile))
 }
 
