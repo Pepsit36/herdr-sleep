@@ -135,6 +135,15 @@ fn save_conversation(sid: &str) {
     }
 }
 
+/// Rows of status bar drawn under the input box (`FAKE_AGENT_STATUS_LINES`), like the
+/// tall status line of Claude Code.
+fn status_lines() -> usize {
+    std::env::var("FAKE_AGENT_STATUS_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
 fn rule() -> String {
     "\u{2500}".repeat(RULE_WIDTH)
 }
@@ -142,7 +151,11 @@ fn rule() -> String {
 /// Draws the input box and leaves the cursor at the end of the prompt line.
 fn draw_box(out: &mut impl Write, typed: &str) {
     let _ = write!(out, "{}\r\n\u{276F}\u{a0}{typed}\r\n{}", rule(), rule());
-    let _ = write!(out, "\x1b[1A\r\x1b[2K\u{276F}\u{a0}{typed}");
+    let status = status_lines();
+    for row in 1..=status {
+        let _ = write!(out, "\r\n  status {row}");
+    }
+    let _ = write!(out, "\x1b[{}A\r\x1b[2K\u{276F}\u{a0}{typed}", status + 1);
     let _ = out.flush();
 }
 
@@ -152,9 +165,9 @@ fn redraw(out: &mut impl Write, typed: &str) {
     let _ = out.flush();
 }
 
-/// Leaves the box: cursor below the bottom rule, at column 0.
+/// Leaves the box: cursor below the bottom rule and the status bar, at column 0.
 fn leave_box(out: &mut impl Write) {
-    let _ = write!(out, "\x1b[1B\r\n");
+    let _ = write!(out, "\x1b[{}B\r\n", status_lines() + 1);
 }
 
 fn main() {
