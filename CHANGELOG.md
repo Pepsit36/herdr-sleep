@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-18
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Prompt detection:** an agent with a tall status bar under its prompt (about 16 rows with Claude
