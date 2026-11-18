@@ -48,13 +48,57 @@ fn failure_report() -> String {
     )
 }
 
+/// How the pane's shell reads the wake script. The script is typed to that
+/// shell (it runs the resume command with the user's aliases and `PATH`), so
+/// it has to be written in its syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellFamily {
+    /// `sh`, bash, zsh, dash, ksh: the exit status of the last command is `$?`.
+    Posix,
+    /// fish rejects `$?` while parsing and would exit with status 127 before
+    /// running anything: it spells the status `$status`.
+    Fish,
+    /// A shell whose syntax is unknown: no status is read, so nothing in the
+    /// script can fail to parse. A failed resume is not reported.
+    Other,
+}
+
+impl ShellFamily {
+    fn of(shell: &str) -> Self {
+        let name = Path::new(shell)
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_start_matches('-').to_string())
+            .unwrap_or_default();
+        match name.as_str() {
+            "sh" | "bash" | "zsh" | "dash" | "ash" | "ksh" | "mksh" | "pdksh" | "busybox" => {
+                Self::Posix
+            }
+            "fish" => Self::Fish,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// The script the shell runs: the resume command, a report when it failed at
-/// once, then a login shell.
+/// once, then a login shell. Only the exit status of the resume command is
+/// spelled in the shell's own syntax; the report itself is a POSIX `sh`
+/// script, run by `sh`.
 pub fn wake_script(resume: &[String], shell: &str) -> String {
+    script_for(resume, shell, ShellFamily::of(shell))
+}
+
+fn script_for(resume: &[String], shell: &str, family: ShellFamily) -> String {
     let command: Vec<String> = resume.iter().map(|w| shell_quote(w)).collect();
     let command = command.join(" ");
+    let status = match family {
+        ShellFamily::Posix => "$?",
+        ShellFamily::Fish => "$status",
+        ShellFamily::Other => {
+            return format!("{command}; exec {} -l", shell_quote(shell));
+        }
+    };
     format!(
-        "{command}; sh -c {} sh $? {}; exec {} -l",
+        "{command}; sh -c {} sh {status} {}; exec {} -l",
         shell_quote(&failure_report()),
         shell_quote(&command),
         shell_quote(shell)
@@ -196,10 +240,73 @@ mod tests {
         assert!(script.ends_with("; exec /bin/zsh -l"));
     }
 
+    #[test]
+    fn the_status_is_spelled_in_the_syntax_of_the_shell() {
+        let resume = vec!["claude".to_string()];
+        let posix = wake_script(&resume, "/bin/zsh");
+        assert!(
+            posix.contains(" sh $? ") && !posix.contains("$status"),
+            "{posix}"
+        );
+        let login = wake_script(&resume, "-bash");
+        assert!(login.contains(" sh $? "), "{login}");
+        let fish = wake_script(&resume, "/usr/bin/fish");
+        assert!(
+            fish.contains(" sh $status ") && !fish.contains("$?"),
+            "{fish}"
+        );
+        // An unknown shell gets a script with no status at all.
+        let other = wake_script(&resume, "/usr/bin/nu");
+        assert_eq!(other, "claude; exec /usr/bin/nu -l");
+    }
+
+    /// Path of `fish`, when it is installed.
+    fn fish() -> Option<PathBuf> {
+        [
+            "/usr/bin/fish",
+            "/usr/local/bin/fish",
+            "/bin/fish",
+            "/opt/homebrew/bin/fish",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+    }
+
+    #[test]
+    fn the_script_parses_and_reaches_the_login_shell_in_fish() {
+        let Some(fish) = fish() else {
+            eprintln!("fish is not installed: skipped");
+            return;
+        };
+        for (resume, report) in [(&["true"][..], false), (&["sh", "-c", "exit 3"][..], true)] {
+            // Written for fish, with the login shell replaced by `echo` to see it start.
+            let resume: Vec<String> = resume.iter().map(|w| w.to_string()).collect();
+            let script = script_for(&resume, "/bin/echo", ShellFamily::Fish);
+            let out = Command::new(&fish)
+                .args(["-i", "-c", &script])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let (stdout, stderr) = (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+            assert!(!stderr.contains("$?"), "{stderr}");
+            assert!(stdout.trim_end().ends_with("-l"), "{stdout}");
+            assert_eq!(
+                stdout.contains("could not be resumed (exit status 3)"),
+                report,
+                "{stdout}"
+            );
+        }
+    }
+
     fn run_script(resume: &[&str]) -> String {
         let resume: Vec<String> = resume.iter().map(|w| w.to_string()).collect();
         let out = Command::new("sh")
-            .args(["-c", &wake_script(&resume, "/bin/echo")])
+            .args(["-c", &script_for(&resume, "/bin/echo", ShellFamily::Posix)])
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
