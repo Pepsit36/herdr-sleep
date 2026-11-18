@@ -205,7 +205,7 @@ is replayed into the agent once it is ready.
   reproduces Claude Code's prompt. Prompt detection was checked against real Claude Code screens.
 - **Codex, Cursor, Gemini**: built-in profiles are best effort and have not been run against the real
   agents. If one misbehaves, override its fields in `[agents.<kind>]` and please open an issue.
-- **Shells**: the wake was run with bash and zsh in the end-to-end suite; fish is covered by a unit
+- **Shells**: the end-to-end suite runs the wake in bash; zsh is only covered by unit tests of the script, and fish is covered by a unit
   test that runs the wake script in a real fish when one is installed.
 - **Linux**: tested. **macOS**: the binaries are cross-compiled and the code paths that differ
   (process environment lookup) are unit tested, but nothing has been run on a Mac yet.
