@@ -104,13 +104,22 @@ impl fmt::Display for Refusal {
             Refusal::NotIncluded => f.write_str("name is not in include_names"),
             Refusal::Excluded => f.write_str("name is in exclude_names"),
             Refusal::NameExcluded(name) => {
-                write!(f, "name {name} matches exclude_name_regex")
+                write!(
+                    f,
+                    "excluded-name-regex: name {name} matches exclude_name_regex"
+                )
             }
             Refusal::ScreenExcluded(line) => {
-                write!(f, "screen matches exclude_screen_regex: {line}")
+                write!(
+                    f,
+                    "excluded-screen-regex: the screen matches exclude_screen_regex ({line})"
+                )
             }
             Refusal::CmdlineExcluded(command) => {
-                write!(f, "command line matches exclude_cmdline_regex: {command}")
+                write!(
+                    f,
+                    "excluded-cmdline-regex: a command line matches exclude_cmdline_regex ({command})"
+                )
             }
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
