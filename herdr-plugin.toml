@@ -2,7 +2,7 @@ id = "pepsit36.herdr-sleep"
 name = "Herdr Sleep"
 # Never edit by hand: the release job writes the version of each release (ADR 0007).
 # 0.0.0 marks an unreleased checkout, which scripts/build.sh builds from source.
-version = "0.2.0"
+version = "0.3.0"
 description = "Puts idle coding agents to sleep to free memory and wakes them on demand, keeping their pane, name and session."
 min_herdr_version = "0.9.2"
 platforms = ["linux", "macos"]
