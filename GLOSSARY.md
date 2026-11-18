@@ -37,7 +37,7 @@ How long an Agent has been Settled, unfocused and unchanged, measured by the Wat
 _Avoid_: Inactivity, age
 
 **Guard**:
-A condition that forbids sleep even when the Idle time is reached (working, focused, typed draft, busy children, protected environment, unrecognised prompt).
+A condition that forbids sleep even when the Idle time is reached (working, focused, typed draft, busy children, protected environment, unrecognised prompt, or a name, screen or command line the user excluded by pattern).
 _Avoid_: Check, filter, rule
 
 **Sleep**:

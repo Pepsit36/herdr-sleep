@@ -14,6 +14,21 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+
+<!-- stamped -->
+
+### Added
+
+- **Exclusion patterns:** three new optional settings keep an agent awake. `exclude_name_regex`
+  matches the agent's name, `exclude_screen_regex` matches the last lines of its screen (for
+  example "waiting for approval") and `exclude_cmdline_regex` matches its command line or that of
+  any of its child processes. All are case-insensitive and empty by default. A match blocks the
+  sweep and `sleep`, which explains itself (`excluded-name-regex`, `excluded-screen-regex`,
+  `excluded-cmdline-regex`) and suggests `--force`; `herdr-sleep status` shows the reason. After a
+  Herdr restart the Placeholders of sleeping panes still come back; an agent resumed from a saved
+  session stays awake when a pattern matches.
+
 ## [0.2.0] - 2026-11-17
 
 <!-- stamped -->
