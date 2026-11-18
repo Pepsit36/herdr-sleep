@@ -11,3 +11,4 @@ Sleeping must keep the pane (position, cwd, name, Herdr identity) and leave as l
 
 - The plugin must wait for Herdr to release the native agent identity before the Placeholder reports its own, otherwise the pane shows a stale agent.
 - The Placeholder must restore the terminal state (termios, cwd) before handing over to the shell.
+- The wake script is parsed by the pane's own shell, so it is written in that shell's syntax: only the exit status of the resume command differs (`$?`, `$status` in fish), and a shell the plugin does not know gets a script without it. fish once rejected a POSIX script and closed the pane.

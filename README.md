@@ -46,7 +46,9 @@ Update with `herdr plugin update`.
 3. **Wake.** Focusing the pane (or its tab or space), pressing any key in it, sending it a prompt
    with `herdr agent prompt`, or running `herdr-sleep wake` starts the agent again with its
    `--resume`. The pane name comes back, and what you typed meanwhile is typed into the agent when
-   it shows its prompt.
+   it shows its prompt. The agent is started by the shell the pane had, so its aliases and `PATH`
+   apply; bash, zsh and fish are handled, and with another shell nothing is reported when the
+   resume fails (see Troubleshooting).
 4. **After a Herdr restart,** the plugin puts every pane back to sleep at startup, instead of letting
    Herdr relaunch all the agents at once. Set `resume_agents_on_restore = false` in the `[session]`
    section of Herdr's config so that Herdr does not also relaunch them. Panes that were asleep get
@@ -181,6 +183,10 @@ is replayed into the agent once it is ready.
   are not the same as `ignore_child_regex`, which makes a child process stop counting as work.
   `herdr-sleep sleep --force` ignores them like every other guard. A pattern that does not compile
   is reported with its key and the Watcher keeps the previous valid configuration.
+- **The pane shows a bare shell after a wake.** When the resume command fails within ten seconds,
+  the pane says so, prints the command it tried and stays at a login shell. That report needs a
+  shell the plugin knows (bash, zsh, fish and other POSIX shells); with any other shell the
+  agent is still resumed, but a failure is silent.
 - **Nothing happens at all.** Run `herdr-sleep ensure-watcher`, then check the journal,
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
 - **See what would happen** with `dry_run = true`.
@@ -199,6 +205,8 @@ is replayed into the agent once it is ready.
   reproduces Claude Code's prompt. Prompt detection was checked against real Claude Code screens.
 - **Codex, Cursor, Gemini**: built-in profiles are best effort and have not been run against the real
   agents. If one misbehaves, override its fields in `[agents.<kind>]` and please open an issue.
+- **Shells**: the wake was run with bash and zsh in the end-to-end suite; fish is covered by a unit
+  test that runs the wake script in a real fish when one is installed.
 - **Linux**: tested. **macOS**: the binaries are cross-compiled and the code paths that differ
   (process environment lookup) are unit tested, but nothing has been run on a Mac yet.
 - Herdr versions 0.9.3 and 0.9.4 were not exercised individually.
