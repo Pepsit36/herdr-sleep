@@ -436,15 +436,20 @@ pub fn prompt_state(screen_ansi: &str, profile: &Profile) -> PromptState {
     in_zone(area).unwrap_or(PromptState::NotFound)
 }
 
-/// The lines between the last two rules of the screen.
+/// The lines between the last two rules of the screen. A rule that a narrow
+/// pane wraps onto several rows counts once.
 fn framed_zone<'a, 'l>(lines: &'a [&'l str], profile: &Profile) -> Option<&'a [&'l str]> {
     let frame = profile.prompt_frame_regex.as_ref()?;
-    let mut rules = lines.iter().enumerate().rev().filter(|(_, line)| {
+    let is_rule = |line: &str| {
         let plain: String = parse_cells(line).iter().map(|c| c.ch).collect();
         frame.is_match(&plain)
-    });
-    let (lower, _) = rules.next()?;
-    let (upper, _) = rules.next()?;
+    };
+    // The first row of the lowest rule, then the last row of the one above.
+    let mut lower = lines.iter().rposition(|line| is_rule(line))?;
+    while lower > 0 && is_rule(lines[lower - 1]) {
+        lower -= 1;
+    }
+    let upper = lines[..lower].iter().rposition(|line| is_rule(line))?;
     Some(&lines[upper + 1..lower])
 }
 
@@ -748,6 +753,24 @@ mod tests {
             prompt_state(&screen, &profile("claude")),
             PromptState::NotFound
         );
+    }
+
+    #[test]
+    fn a_rule_wrapped_by_a_narrow_pane_counts_once() {
+        let wrapped = format!(
+            "{}\r\n{}\r\n\u{276F}\u{a0}\r\n{}\r\n{}\r\nstatus",
+            "\u{2500}".repeat(40),
+            "\u{2500}".repeat(20),
+            "\u{2500}".repeat(40),
+            "\u{2500}".repeat(20),
+        );
+        assert_eq!(
+            prompt_state(&wrapped, &profile("claude")),
+            PromptState::Empty
+        );
+        // Only one rule is left: the last rows are searched.
+        let lone = format!("{0}\r\n{0}\r\n\u{276F}\u{a0}", "\u{2500}".repeat(40));
+        assert_eq!(prompt_state(&lone, &profile("claude")), PromptState::Empty);
     }
 
     #[test]
