@@ -1538,6 +1538,30 @@ mod tests {
     }
 
     #[test]
+    fn exclusion_regexes_never_block_the_return_of_a_registered_pane() {
+        let fake = Fake::new("excluded-registry").pane("w1-2", Spec::ready());
+        let config = Config::from_toml_str(
+            "exclude_name_regex = [\".\"]\nexclude_screen_regex = [\".\"]\nexclude_cmdline_regex = [\".\"]",
+        )
+        .unwrap();
+        let report = restore(&fake, &config);
+        assert_eq!(report.restored, ["w1-2"]);
+        assert_eq!(fake.runs().len(), 1);
+    }
+
+    #[test]
+    fn a_resumed_agent_with_an_excluded_name_stays_awake_and_says_why() {
+        let mut fake = Fake::new("excluded-saved").pane("w1-2", Spec::saved("/proj"));
+        fake.guard = Some(Refusal::NameExcluded("deploy".into()));
+        let report = run(&fake);
+        assert_eq!(starts(&fake).len(), 1);
+        assert!(
+            report.skipped[0].1.contains("matches exclude_name_regex"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
     fn dry_run_never_resumes_an_agent() {
         let fake = Fake::new("dry").pane("w1-2", Spec::saved("/proj"));
         let config = Config {

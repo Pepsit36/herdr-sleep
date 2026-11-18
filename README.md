@@ -115,6 +115,10 @@ include_names = []          # if set, only these agent names may sleep
 exclude_names = []
 exclude_cwd_regex = []      # never sleep an agent whose directory matches
 protect_env_vars = []       # never sleep a process carrying one of these variables
+# Regexes (case-insensitive) that keep an agent awake whenever they match:
+exclude_name_regex = []     # the agent's name
+exclude_screen_regex = []   # one of the last lines of its screen, e.g. "waiting for approval"
+exclude_cmdline_regex = []  # its command line or that of any child, ignored children included
 # Child processes that never block the sleep (case-insensitive regexes).
 # Setting this replaces the built-in list.
 ignore_child_regex = ["mcp", "npm exec", "language-server", "tsserver", "caffeinate",
@@ -171,6 +175,12 @@ is replayed into the agent once it is ready.
   matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess),
   `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
   first message: it could not be resumed, so the agent is left alone and retried later), and so on.
+- **An agent stays awake on purpose.** `excluded-name-regex`, `excluded-screen-regex` and
+  `excluded-cmdline-regex` mean one of your `exclude_name_regex`, `exclude_screen_regex` or
+  `exclude_cmdline_regex` patterns matched; the refusal names the text that matched. These patterns
+  are not the same as `ignore_child_regex`, which makes a child process stop counting as work.
+  `herdr-sleep sleep --force` ignores them like every other guard. A pattern that does not compile
+  is reported with its key and the Watcher keeps the previous valid configuration.
 - **Nothing happens at all.** Run `herdr-sleep ensure-watcher`, then check the journal,
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
 - **See what would happen** with `dry_run = true`.

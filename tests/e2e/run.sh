@@ -449,6 +449,39 @@ s10_sweep_now_and_sleep_errors() {
   if [ "$rc" = 1 ] && [ -n "$out" ]; then ok "a refused sleep explains itself on stderr"; else bad "refused sleep: rc=$rc stderr='$out'"; fi
 }
 
+s11_exclusion_regexes() {
+  new_world "$CONFIG_MANUAL" || return
+  local out rc key
+  set_config() { printf '%s\n' "$CONFIG_MANUAL" "$1" >"$CONFIG_DIR/config.toml"; }
+  # Each exclusion key is checked on its own: the pane stays awake, `sleep` says why and
+  # suggests --force, `config` shows the key.
+  herdr pane send-text "$PANE_A" "waiting for approval" >/dev/null 2>&1
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  wait_for 30 is_awake_idle "$PANE_A"
+  for key in 'exclude_name_regex = ["^ALP"]|excluded-name-regex' \
+    'exclude_screen_regex = ["Waiting for approval"]|excluded-screen-regex' \
+    'exclude_cmdline_regex = ["claude"]|excluded-cmdline-regex'; do
+    set_config "${key%%|*}"
+    out="$(hs sleep alpha 2>&1 >/dev/null)"
+    rc=$?
+    if [ "$rc" = 1 ] && [[ "$out" == *"${key##*|}"* ]]; then ok "sleep refuses with ${key##*|}"; else bad "${key##*|}: rc=$rc stderr='$out'"; fi
+    if [[ "$out" == *"--force"* ]]; then ok "the refusal suggests --force"; else bad "no --force hint: '$out'"; fi
+    hs sweep --now >/dev/null 2>&1
+    if is_awake_idle "$PANE_A"; then ok "sweep --now leaves alpha awake (${key##*|})"; else bad "alpha is '$(agent_kind "$PANE_A")' after sweep --now (${key##*|})"; fi
+    if hs config 2>&1 | grep -q "^$(sed 's/ =.*//' <<<"${key%%|*}") = \\["; then ok "config shows ${key%%|*}"; else bad "config does not show ${key%%|*}"; fi
+  done
+  # An invalid regex is an error that names the key; the file is kept.
+  set_config 'exclude_screen_regex = ["("]'
+  out="$(hs sweep --now 2>&1)"
+  if [[ "$out" == *exclude_screen_regex* ]]; then ok "an invalid regex names its key"; else bad "invalid regex message: '$out'"; fi
+  # --force ignores the three patterns.
+  set_config 'exclude_name_regex = ["^ALP"]
+exclude_screen_regex = ["Waiting for approval"]
+exclude_cmdline_regex = ["claude"]'
+  hs sleep --force alpha >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "sleep --force ignores the exclusions"; else bad "alpha is '$(agent_kind "$PANE_A")' after sleep --force"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -460,6 +493,7 @@ SCENARIOS=(
   "s8|the Watcher sleeps an idle agent|s8_watcher"
   "s9|restart with an awake agent (Saved session)|s9_restart_with_an_awake_agent"
   "s10|sweep --now and explicit sleep errors|s10_sweep_now_and_sleep_errors"
+  "s11|exclusion regexes keep an agent awake|s11_exclusion_regexes"
 )
 
 # ---------------------------------------------------------------------------

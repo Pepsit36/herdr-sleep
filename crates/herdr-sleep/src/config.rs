@@ -48,7 +48,7 @@ const SWEEP_INTERVAL_RANGE: std::ops::RangeInclusive<i64> = 5..=3600;
 const DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS: u64 = 60;
 const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 16] = [
+const TOP_LEVEL_KEYS: [&str; 19] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
@@ -62,6 +62,9 @@ const TOP_LEVEL_KEYS: [&str; 16] = [
     "exclude_cwd_regex",
     "protect_env_vars",
     "ignore_child_regex",
+    "exclude_name_regex",
+    "exclude_screen_regex",
+    "exclude_cmdline_regex",
     "sweep_interval_seconds",
     "restore_settle_timeout_seconds",
     "agents",
@@ -266,6 +269,12 @@ pub struct Config {
     pub protect_env_vars: Vec<String>,
     #[serde(serialize_with = "ser_regexes")]
     pub ignore_child_regex: Vec<Regex>,
+    #[serde(serialize_with = "ser_regexes")]
+    pub exclude_name_regex: Vec<Regex>,
+    #[serde(serialize_with = "ser_regexes")]
+    pub exclude_screen_regex: Vec<Regex>,
+    #[serde(serialize_with = "ser_regexes")]
+    pub exclude_cmdline_regex: Vec<Regex>,
     pub sweep_interval_seconds: u64,
     pub restore_settle_timeout_seconds: u64,
     /// Managed Profiles by Kind: built-ins with overrides plus custom kinds.
@@ -298,6 +307,9 @@ struct RawConfig {
     exclude_cwd_regex: Option<Vec<String>>,
     protect_env_vars: Option<Vec<String>>,
     ignore_child_regex: Option<Vec<String>>,
+    exclude_name_regex: Option<Vec<String>>,
+    exclude_screen_regex: Option<Vec<String>>,
+    exclude_cmdline_regex: Option<Vec<String>>,
     sweep_interval_seconds: Option<i64>,
     restore_settle_timeout_seconds: Option<i64>,
     agents: BTreeMap<String, RawAgent>,
@@ -530,6 +542,18 @@ impl Config {
             "exclude_cwd_regex",
             &raw.exclude_cwd_regex.unwrap_or_default(),
         )?;
+        let exclude_name_regex = compile_all(
+            "exclude_name_regex",
+            &raw.exclude_name_regex.unwrap_or_default(),
+        )?;
+        let exclude_screen_regex = compile_all(
+            "exclude_screen_regex",
+            &raw.exclude_screen_regex.unwrap_or_default(),
+        )?;
+        let exclude_cmdline_regex = compile_all(
+            "exclude_cmdline_regex",
+            &raw.exclude_cmdline_regex.unwrap_or_default(),
+        )?;
 
         let profiles = build_profiles(raw.agents, &mut warnings)?;
 
@@ -549,6 +573,9 @@ impl Config {
             exclude_cwd_regex,
             protect_env_vars,
             ignore_child_regex,
+            exclude_name_regex,
+            exclude_screen_regex,
+            exclude_cmdline_regex,
             sweep_interval_seconds: sweep as u64,
             restore_settle_timeout_seconds: settle as u64,
             profiles,
@@ -592,6 +619,23 @@ impl Config {
         self.ignore_child_regex
             .iter()
             .any(|re| re.is_match(command))
+    }
+
+    /// Whether `name` matches `exclude_name_regex`.
+    pub fn name_excluded(&self, name: &str) -> bool {
+        self.exclude_name_regex.iter().any(|re| re.is_match(name))
+    }
+
+    /// Whether `command` matches `exclude_cmdline_regex`.
+    pub fn cmdline_excluded(&self, command: &str) -> bool {
+        self.exclude_cmdline_regex
+            .iter()
+            .any(|re| re.is_match(command))
+    }
+
+    /// Whether a line of the agent's screen matches `exclude_screen_regex`.
+    pub fn screen_excluded(&self, line: &str) -> bool {
+        self.exclude_screen_regex.iter().any(|re| re.is_match(line))
     }
 
     /// The Profile of `kind`, when the Kind is managed.
@@ -662,6 +706,17 @@ impl Config {
 # Seconds `restore` waits, per pane and per pass, for the pane's shell and for Herdr to
 # release the native agent identity after a Herdr restart (5 to 600).
 #restore_settle_timeout_seconds = {DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS}
+
+# Agents whose name matches one of these regexes never sleep (case-insensitive).
+#exclude_name_regex = []
+
+# Agents whose last screen lines match one of these regexes never sleep (case-insensitive),
+# for example "waiting for approval" or "running tests".
+#exclude_screen_regex = []
+
+# Agents whose command line, or the command line of one of their child processes (even an
+# ignored one), matches one of these regexes never sleep (case-insensitive).
+#exclude_cmdline_regex = []
 
 # Per-kind profiles. A table overrides single fields of a built-in kind (claude,
 # codex, cursor, gemini) or defines a new kind, which needs all four fields.
@@ -871,6 +926,36 @@ mod tests {
         let c = cfg(r#"include_names = ["b"]
 exclude_names = ["b"]"#);
         assert!(!c.name_allowed(Some("b")));
+    }
+
+    #[test]
+    fn exclusion_regexes_are_empty_by_default_and_case_insensitive() {
+        let c = Config::default();
+        assert!(c.exclude_name_regex.is_empty());
+        assert!(c.exclude_screen_regex.is_empty());
+        assert!(c.exclude_cmdline_regex.is_empty());
+        assert!(!c.name_excluded("deploy") && !c.screen_excluded("x") && !c.cmdline_excluded("x"));
+        let c = cfg(r#"
+            exclude_name_regex = ["^deploy"]
+            exclude_screen_regex = ["waiting for approval"]
+            exclude_cmdline_regex = ["cargo (test|build)"]
+        "#);
+        assert!(c.warnings.is_empty());
+        assert!(c.name_excluded("Deploy-prod") && !c.name_excluded("redeploy"));
+        assert!(c.screen_excluded("  WAITING for Approval  ") && !c.screen_excluded("done"));
+        assert!(c.cmdline_excluded("Cargo TEST --all") && !c.cmdline_excluded("cargo fmt"));
+    }
+
+    #[test]
+    fn invalid_exclusion_regexes_name_their_key() {
+        for key in [
+            "exclude_name_regex",
+            "exclude_screen_regex",
+            "exclude_cmdline_regex",
+        ] {
+            let e = err(&format!(r#"{key} = ["ok", "("]"#));
+            assert!(e.contains(key) && e.contains("`(`"), "{e}");
+        }
     }
 
     #[test]
