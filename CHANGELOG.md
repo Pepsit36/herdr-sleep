@@ -14,6 +14,16 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-19
+
+<!-- stamped -->
+
+### Fixed
+
+- **Sleeping pane:** the placeholder no longer shows the agent's empty input box and status line
+  under its message. The preview stops above the input box (found with `prompt_frame_regex`) and
+  keeps the last `preview_lines` lines before it. Without a frame on screen it is unchanged.
+
 ## [0.3.2] - 2026-11-18
 
 <!-- stamped -->

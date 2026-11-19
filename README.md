@@ -41,7 +41,8 @@ Update with `herdr plugin update`.
 2. **Sleep.** Safety guards run first: the agent must have a session, be at an empty prompt, have no
    busy child process and not be excluded by your filters. Then the plugin types the agent's exit
    command, waits for Herdr to forget the agent, and replaces the pane's shell with the
-   **placeholder**, which shows the last lines of the agent's screen and announces a
+   **placeholder**, which shows the last lines of the agent's screen above its input box (the box
+   and the status bar under it are left out) and announces a
    `sleeping-<kind>` agent to Herdr under the same name.
 3. **Wake.** Focusing the pane (or its tab or space), pressing any key in it, sending it a prompt
    with `herdr agent prompt`, or running `herdr-sleep wake` starts the agent again with its
@@ -109,7 +110,7 @@ dry_run = false
 sleep_icon = "💤"
 token_name = "sleep"        # shown as $sleep in sidebar rows
 tab_prefix = true           # prefix the label of a tab whose agents all sleep
-preview_lines = 20          # last lines of the agent kept on the sleeping pane
+preview_lines = 20          # last lines above the input box kept on the sleeping pane
 notify = true               # Herdr notification when an agent falls asleep by itself
 
 # Selection
@@ -136,7 +137,8 @@ restore_settle_timeout_seconds = 60
 # Prompt detection. The prompt is looked for between the last two rules of the screen (lines
 # matching prompt_frame_regex), whatever sits above or below them, such as a tall status bar.
 # Without such a frame the last prompt_area_lines rows are searched (5 to 40). An empty
-# prompt_frame_regex turns the frame detection off. Both can be set per agent too.
+# prompt_frame_regex turns the frame detection off, and with it the trimming of the sleeping pane
+# preview. Both can be set per agent too.
 prompt_area_lines = 15
 prompt_frame_regex = '^\s*\u{2500}[\u{2500}\s]{9,}$'   # a line of at least ten "─"
 

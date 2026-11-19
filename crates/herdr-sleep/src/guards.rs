@@ -439,6 +439,12 @@ pub fn prompt_state(screen_ansi: &str, profile: &Profile) -> PromptState {
 /// The lines between the last two rules of the screen. A rule that a narrow
 /// pane wraps onto several rows counts once.
 fn framed_zone<'a, 'l>(lines: &'a [&'l str], profile: &Profile) -> Option<&'a [&'l str]> {
+    let (upper, lower) = frame_bounds(lines, profile)?;
+    Some(&lines[upper + 1..lower])
+}
+
+/// Row of the upper rule and of the first row of the lower rule.
+fn frame_bounds(lines: &[&str], profile: &Profile) -> Option<(usize, usize)> {
     let frame = profile.prompt_frame_regex.as_ref()?;
     let is_rule = |line: &str| {
         let plain: String = parse_cells(line).iter().map(|c| c.ch).collect();
@@ -450,7 +456,19 @@ fn framed_zone<'a, 'l>(lines: &'a [&'l str], profile: &Profile) -> Option<&'a [&
         lower -= 1;
     }
     let upper = lines[..lower].iter().rposition(|line| is_rule(line))?;
-    Some(&lines[upper + 1..lower])
+    Some((upper, lower))
+}
+
+/// The screen above the input box: everything before the upper rule of the
+/// frame, so the box and the status bar below it are left out. `None` without
+/// a frame.
+pub fn above_frame<'a>(screen: &'a str, profile: &Profile) -> Option<Vec<&'a str>> {
+    let lines: Vec<&str> = screen
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let (upper, _) = frame_bounds(&lines, profile)?;
+    Some(lines[..upper].to_vec())
 }
 
 /// One visible character and whether it is drawn dim or grey.

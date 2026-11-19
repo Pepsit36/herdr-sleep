@@ -20,8 +20,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::config::Config;
-use crate::guards::{Refusal, SleepMode};
+use crate::config::{Config, Profile};
+use crate::guards::{self, Refusal, SleepMode};
 use crate::herdr::Agent;
 use crate::journal::Journal;
 
@@ -215,7 +215,7 @@ pub fn sleep_agent(
     }
 
     // 3. Preview and memory figure, both best effort.
-    let preview = write_preview(env, config, pane, &state_dir);
+    let preview = write_preview(env, config, profile, pane, &state_dir);
     let freed_kb = env.agent_rss_kb(agent, &profile.bin).unwrap_or(0);
 
     // 4. Quit the agent through its exit command.
@@ -386,15 +386,29 @@ fn notification_text(icon: &str, label: &str, kind: &str, freed_mb: u64) -> Stri
     text
 }
 
-/// Capture the Preview into `<state_dir>/preview-<pane>.txt`. A failure only
-/// drops the preview.
-fn write_preview(env: &dyn Env, config: &Config, pane: &str, state_dir: &Path) -> Option<String> {
-    let lines = usize::try_from(config.preview_lines).ok()?;
-    if lines == 0 {
+/// Capture the Preview into `<state_dir>/preview-<pane>.txt`: the last
+/// `preview_lines` lines above the input box, or of the whole screen when no
+/// frame is found. A failure only drops the preview.
+fn write_preview(
+    env: &dyn Env,
+    config: &Config,
+    profile: &Profile,
+    pane: &str,
+    state_dir: &Path,
+) -> Option<String> {
+    let wanted = usize::try_from(config.preview_lines).ok()?;
+    if wanted == 0 {
         return None;
     }
-    let screen = env.screen_text(pane, lines).ok()?;
-    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let screen = env
+        .screen_text(pane, guards::SCREEN_LINES.max(wanted))
+        .ok()?;
+    let lines: Vec<&str> = match guards::above_frame(&screen, profile) {
+        Some(above) => above,
+        None => screen.lines().collect(),
+    };
+    let lines: Vec<&str> = lines.iter().map(|l| l.trim_end()).collect();
+    let lines = &lines[lines.len().saturating_sub(wanted)..];
     let first = lines.iter().position(|l| !l.is_empty())?;
     let last = lines.iter().rposition(|l| !l.is_empty())?;
     let text = lines[first..=last].join("\n");
@@ -837,7 +851,7 @@ mod tests {
 
         let preview = fake.dir().join("preview-w1-2.txt");
         assert_eq!(std::fs::read_to_string(&preview).unwrap(), "  last line\n>");
-        let lines = config().preview_lines;
+        let lines = guards::SCREEN_LINES;
         let expected_run = format!(
             "run w1-2 exec /opt/bin/herdr-sleep-ph --pane w1-2 --name worker --kind claude \
              --session sess-1 --state-dir {dir} --main-bin /opt/bin/herdr-sleep \
@@ -1050,6 +1064,31 @@ mod tests {
                 .iter()
                 .any(|c| c.starts_with("text") || c.starts_with("keys"))
         );
+    }
+
+    #[test]
+    fn preview_leaves_out_the_input_box_and_the_status_bar() {
+        let rule = "\u{2500}".repeat(20);
+        let mut fake = Fake::new("preview-frame");
+        fake.screen = Ok(format!(
+            "old\n  answer\n\n{rule}\n> \n{rule}\n  [Sonnet] status\n  more status\n"
+        ));
+        run(&fake, SleepMode::Sweep);
+        let preview = fake.dir().join("preview-w1-2.txt");
+        assert_eq!(std::fs::read_to_string(preview).unwrap(), "old\n  answer");
+    }
+
+    #[test]
+    fn preview_keeps_the_last_lines_above_the_frame() {
+        let rule = "\u{2500}".repeat(20);
+        let mut fake = Fake::new("preview-count");
+        let many: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        fake.screen = Ok(format!("{many}{rule}\n> \n{rule}\nstatus\n"));
+        run(&fake, SleepMode::Sweep);
+        let text = std::fs::read_to_string(fake.dir().join("preview-w1-2.txt")).unwrap();
+        let kept: Vec<&str> = text.lines().collect();
+        assert_eq!(kept.len(), usize::try_from(config().preview_lines).unwrap());
+        assert_eq!(kept.last(), Some(&"line 50"));
     }
 
     #[test]
