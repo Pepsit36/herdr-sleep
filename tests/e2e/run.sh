@@ -514,6 +514,18 @@ s13_preview_without_input_box() {
   if [[ "$text" != *"status 1"* && "$text" != *$'\u2500\u2500\u2500\u2500'* ]]; then ok "no input box rule and no status bar under the message"; else bad "input box or status bar left: $text"; fi
 }
 
+s14_action_refusal() {
+  new_world "$CONFIG_MANUAL" || return
+  local out rc
+  printf '%s\n' "$CONFIG_MANUAL" 'exclude_name_regex = ["^ALP"]' >"$CONFIG_DIR/config.toml"
+  # Started like the Herdr action: no target, the pane comes from the action context. The
+  # refusal is also sent as a notification, which must not change the outcome.
+  out="$(HERDR_PANE_ID="$PANE_A" hs sleep 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" == *excluded-name-regex* && "$out" == *"--force"* ]]; then ok "an action refusal still explains itself and exits 1"; else bad "rc=$rc stderr='$out'"; fi
+  if is_awake_idle "$PANE_A"; then ok "alpha stays awake"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -528,6 +540,7 @@ SCENARIOS=(
   "s11|exclusion regexes keep an agent awake|s11_exclusion_regexes"
   "s12|prompt found under a tall status bar|s12_tall_status_bar"
   "s13|preview leaves out the input box and status bar|s13_preview_without_input_box"
+  "s14|a refused action sleep explains itself|s14_action_refusal"
 )
 
 # ---------------------------------------------------------------------------

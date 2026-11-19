@@ -14,6 +14,13 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sleep action:** when the `sleep` action (keybinding or action picker) cannot put the pane to
+  sleep, Herdr now shows a notification with the reason and what to try (for example a draft in the
+  prompt, or `--force`). Before, the explanation went to a stderr nobody sees. It is shown whatever
+  `notify` says.
+
 ## [0.3.3] - 2026-11-19
 
 <!-- stamped -->
