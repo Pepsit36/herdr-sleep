@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-19
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleeping pane:** the placeholder no longer shows the agent's empty input box and status line
