@@ -15,9 +15,9 @@ use herdr_sleep::guards::{Refusal, SleepMode};
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    ActionContext, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, RestoreReport, SleepOutcome,
-    SweepReport, SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay, sleep_agent,
-    sleep_agent_waiting, sleep_saved_session, sweep_now, sweep_once, wake_agent,
+    ActionContext, Env, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, RestoreReport,
+    SleepOutcome, SweepReport, SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay,
+    sleep_agent, sleep_agent_waiting, sleep_saved_session, sweep_now, sweep_once, wake_agent,
 };
 use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
@@ -74,6 +74,9 @@ pub fn sleep(
     wait: Option<u64>,
     json: bool,
 ) -> ExitCode {
+    // Started from a Herdr action (no target given): nobody reads stderr, so
+    // a Sleep that did not happen is explained in a notification as well.
+    let from_action = target.is_none();
     let target = match target_or_usage("sleep", target) {
         Ok(target) => target,
         Err(code) => return code,
@@ -148,7 +151,24 @@ pub fn sleep(
         },
     };
     report_sleep(&label, &outcome, wait.is_some());
+    if from_action && let Some(text) = refusal_notice(&label, &outcome, wait.is_some()) {
+        let _ = env.notify("Herdr Sleep", &text);
+    }
     exit_code(&outcome)
+}
+
+/// The notification text for a Sleep that did not happen: what stderr says,
+/// with what to try next. `None` when the pane fell asleep (or would, in a
+/// dry run).
+pub fn refusal_notice(label: &str, outcome: &SleepOutcome, waited: bool) -> Option<String> {
+    if matches!(outcome, SleepOutcome::Asleep { .. } | SleepOutcome::DryRun) {
+        return None;
+    }
+    let line = describe(label, outcome);
+    Some(match sleep_hint(outcome, waited) {
+        Some(hint) => format!("{line} ({hint})"),
+        None => line,
+    })
 }
 
 /// Print the outcome: success on stdout, a refusal or failure on stderr
@@ -532,6 +552,32 @@ mod tests {
             describe("worker", &SleepOutcome::DryRun),
             "worker would be put to sleep (dry run)"
         );
+    }
+
+    #[test]
+    fn a_refused_sleep_is_explained_in_a_notification() {
+        let draft = SleepOutcome::Skipped(Refusal::DraftInPrompt);
+        let text = refusal_notice("worker", &draft, false).unwrap();
+        assert!(text.starts_with("worker was not put to sleep: "), "{text}");
+        assert!(text.contains("use --force to skip the guards"), "{text}");
+        let aborted = SleepOutcome::Aborted("no placeholder".into());
+        assert!(
+            refusal_notice("worker", &aborted, false)
+                .unwrap()
+                .starts_with("worker stays awake: no placeholder")
+        );
+        let unmanaged = SleepOutcome::Skipped(Refusal::NotManaged);
+        assert_eq!(
+            refusal_notice("worker", &unmanaged, false).unwrap(),
+            "worker was not put to sleep: agent kind is not managed"
+        );
+    }
+
+    #[test]
+    fn a_successful_sleep_has_no_refusal_notice() {
+        for outcome in [SleepOutcome::Asleep { freed_kb: 1 }, SleepOutcome::DryRun] {
+            assert_eq!(refusal_notice("worker", &outcome, false), None);
+        }
     }
 
     #[test]

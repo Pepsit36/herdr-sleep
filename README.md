@@ -90,6 +90,11 @@ command = "pepsit36.herdr-sleep.sleep"
 description = "sleep this agent"
 ```
 
+When a guard refuses (a draft in the prompt, a busy child, an excluded agent...), the action shows
+a Herdr notification that says why and what to try, since nothing would be printed anywhere you
+can see. It is always shown for the action, whatever `notify` says: `notify` only concerns the
+sleep that happens by itself.
+
 The other actions are `wake`, `sweep` (sleep every idle agent now), `status` and `ensure-watcher`,
 all available from Herdr's action picker.
 
