@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-19
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleep action:** when the `sleep` action (keybinding or action picker) cannot put the pane to
