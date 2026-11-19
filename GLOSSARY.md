@@ -53,7 +53,7 @@ The identity a Placeholder reports to Herdr: Kind prefixed with `sleeping-`, the
 _Avoid_: Ghost, parked agent
 
 **Preview**:
-The last lines of the Agent's screen, captured before Sleep and displayed by the Placeholder.
+The last lines of the Agent's screen above its input box, captured before Sleep and displayed by the Placeholder. The input box and the status bar below it are not part of it.
 _Avoid_: Snapshot, screenshot
 
 **Wake**:

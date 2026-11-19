@@ -502,6 +502,18 @@ s12_tall_status_bar() {
   if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes and is recognised as ready"; else bad "alpha is '$(agent_kind "$PANE_A")' after the wake"; fi
 }
 
+s13_preview_without_input_box() {
+  AGENT_PREFIX="FAKE_AGENT_STATUS_LINES=3 "
+  new_world "$CONFIG_MANUAL" || return
+  AGENT_PREFIX=""
+  hs sleep alpha >/dev/null 2>&1
+  if ! wait_for 40 is_asleep "$PANE_A"; then bad "alpha is '$(agent_kind "$PANE_A")'"; return; fi
+  local text
+  text="$(screen "$PANE_A")"
+  if [[ "$text" == *"is asleep"* ]]; then ok "the placeholder shows its message"; else bad "no message: $text"; fi
+  if [[ "$text" != *"status 1"* && "$text" != *$'\u2500\u2500\u2500\u2500'* ]]; then ok "no input box rule and no status bar under the message"; else bad "input box or status bar left: $text"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -515,6 +527,7 @@ SCENARIOS=(
   "s10|sweep --now and explicit sleep errors|s10_sweep_now_and_sleep_errors"
   "s11|exclusion regexes keep an agent awake|s11_exclusion_regexes"
   "s12|prompt found under a tall status bar|s12_tall_status_bar"
+  "s13|preview leaves out the input box and status bar|s13_preview_without_input_box"
 )
 
 # ---------------------------------------------------------------------------
