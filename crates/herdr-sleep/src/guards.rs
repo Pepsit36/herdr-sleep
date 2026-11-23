@@ -17,6 +17,7 @@ use crate::config::{Config, Profile};
 use crate::herdr::client::{HerdrClient, ReadFormat};
 use crate::herdr::model::{Agent, AgentStatus, ProcessInfo};
 use crate::procs::{self, ProcessTable};
+use crate::tab_label;
 
 /// Number of screen rows read to analyse the prompt. It is at least the largest
 /// `prompt_area_lines` the configuration accepts, and `wake` reads the same
@@ -59,6 +60,7 @@ pub enum Refusal {
     ScreenExcluded(String),
     CmdlineExcluded(String),
     RemoteControl,
+    TabKeptAwake,
     CwdExcluded(String),
     AgentProcessNotFound,
     ProtectedEnv(String),
@@ -82,6 +84,7 @@ impl Refusal {
             Refusal::ScreenExcluded(_) => "excluded-screen-regex",
             Refusal::CmdlineExcluded(_) => "excluded-cmdline-regex",
             Refusal::RemoteControl => "remote-control",
+            Refusal::TabKeptAwake => "tab-kept-awake",
             Refusal::CwdExcluded(_) => "cwd-excluded",
             Refusal::AgentProcessNotFound => "agent-process-not-found",
             Refusal::ProtectedEnv(_) => "protected-env",
@@ -129,6 +132,9 @@ impl fmt::Display for Refusal {
             Refusal::RemoteControl => f.write_str(
                 "remote-control: Remote Control is active, so the agent is driven from another device",
             ),
+            Refusal::TabKeptAwake => f.write_str(
+                "tab-kept-awake: the tab is kept awake (toggle it with the keep-awake action)",
+            ),
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
             Refusal::ProtectedEnv(var) => write!(f, "protected environment variable {var}"),
@@ -164,6 +170,10 @@ pub trait Probe {
     /// Whether Claude Code has saved the conversation of `session_id`,
     /// `None` when that cannot be told.
     fn claude_conversation_saved(&self, session_id: &str) -> Option<bool>;
+    /// The label of tab `tab_id`, `None` when it cannot be read.
+    fn tab_label(&self, _tab_id: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Claude Code's configuration directory: `$CLAUDE_CONFIG_DIR`, else
@@ -217,6 +227,15 @@ impl Probe for LiveProbe<'_> {
         self.client
             .pane_read(self.pane, SCREEN_LINES, ReadFormat::Ansi)
             .ok()
+    }
+
+    fn tab_label(&self, tab_id: &str) -> Option<String> {
+        self.client
+            .tab_list(None)
+            .ok()?
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .map(|tab| tab.label)
     }
 
     fn claude_conversation_saved(&self, session_id: &str) -> Option<bool> {
@@ -290,6 +309,11 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         return Err(Refusal::Focused);
     }
     check_filters(config, agent)?;
+    if ctx.probe.tab_label(&agent.tab_id).is_some_and(|label| {
+        tab_label::keeps_awake(&label, &config.sleep_icon, &config.keep_awake_icon)
+    }) {
+        return Err(Refusal::TabKeptAwake);
+    }
 
     let info = ctx.probe.process_info();
     let pid = info
@@ -1294,6 +1318,53 @@ mod tests {
         let c = with_regex(|c, r| c.exclude_screen_regex = r, "x");
         let r = run(&c, &agent(), &table(&[]), &p, SleepMode::Sweep);
         assert_eq!(r, Err(Refusal::PromptNotDetected));
+    }
+
+    /// A probe that also knows the label of every tab.
+    struct LabelProbe {
+        inner: FakeProbe,
+        label: &'static str,
+    }
+
+    impl Probe for LabelProbe {
+        fn process_info(&self) -> Option<ProcessInfo> {
+            self.inner.process_info()
+        }
+        fn environment(&self, pid: i32) -> Option<Vec<(String, String)>> {
+            self.inner.environment(pid)
+        }
+        fn screen(&self) -> Option<String> {
+            self.inner.screen()
+        }
+        fn claude_conversation_saved(&self, session_id: &str) -> Option<bool> {
+            self.inner.claude_conversation_saved(session_id)
+        }
+        fn tab_label(&self, _: &str) -> Option<String> {
+            Some(self.label.into())
+        }
+    }
+
+    #[test]
+    fn a_tab_kept_awake_refuses_every_sleep_but_force() {
+        let t = table(&[]);
+        let run_with = |label: &'static str, mode| {
+            let p = LabelProbe {
+                inner: probe(&empty_screen()),
+                label,
+            };
+            check(&GuardContext::new(&config(), &agent(), &t, &p), mode)
+        };
+        for mode in [SleepMode::Sweep, SleepMode::Manual] {
+            let r = run_with("\u{1f512} build", mode);
+            assert_eq!(r, Err(Refusal::TabKeptAwake));
+            assert_eq!(r.unwrap_err().code(), "tab-kept-awake");
+        }
+        assert_eq!(
+            run_with("\u{1f4a4} \u{1f512} build", SleepMode::Sweep),
+            Err(Refusal::TabKeptAwake)
+        );
+        assert_eq!(run_with("\u{1f512} build", SleepMode::Force), Ok(()));
+        assert_eq!(run_with("build", SleepMode::Sweep), Ok(()));
     }
 
     #[test]

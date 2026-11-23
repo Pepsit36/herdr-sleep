@@ -15,9 +15,10 @@ use herdr_sleep::guards::{Refusal, SleepMode};
 use herdr_sleep::herdr::Agent;
 use herdr_sleep::herdr::HerdrClient;
 use herdr_sleep::ops::{
-    ActionContext, Env, FocusEvent, LiveEnv, ReplayArgs, ReplayOutcome, RestoreReport,
-    SleepOutcome, SweepReport, SweepState, WakeOptions, WakeOutcome, handle_focus_event, replay,
-    sleep_agent, sleep_agent_waiting, sleep_saved_session, sweep_now, sweep_once, wake_agent,
+    ActionContext, Env, FocusEvent, KeepAwakeOutcome, LiveEnv, ReplayArgs, ReplayOutcome,
+    RestoreReport, SleepOutcome, SweepReport, SweepState, WakeOptions, WakeOutcome,
+    handle_focus_event, replay, sleep_agent, sleep_agent_waiting, sleep_saved_session, sweep_now,
+    sweep_once, wake_agent,
 };
 use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
@@ -231,6 +232,50 @@ pub fn wake(target: Option<&str>, wait: bool, json: bool) -> ExitCode {
         emit(&describe_wake(label, &outcome, wait));
     }
     wake_exit_code(&outcome)
+}
+
+/// Run `herdr-sleep keep-awake [<pane|name>] [--on|--off]`. From a Herdr
+/// action (no target given) the result is also a notification, since nobody
+/// reads the output.
+pub fn keep_awake(target: Option<&str>, state: Option<bool>) -> ExitCode {
+    let from_action = target.is_none();
+    let target = match target_or_usage("keep-awake", target) {
+        Ok(target) => target,
+        Err(code) => return code,
+    };
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => return fail(error),
+    };
+    let env = LiveEnv::new(HerdrClient::from_env());
+    let line = match herdr_sleep::ops::keep_awake(&env, &config, &target, state) {
+        Ok(outcome) => describe_keep_awake(&outcome),
+        Err(error) => {
+            if from_action {
+                let _ = env.notify("Herdr Sleep", &error);
+            }
+            return fail(error);
+        }
+    };
+    emit(&line);
+    if from_action {
+        let _ = env.notify("Herdr Sleep", &line);
+    }
+    ExitCode::SUCCESS
+}
+
+/// One plain-text line for what the keep-awake action did.
+pub fn describe_keep_awake(outcome: &KeepAwakeOutcome) -> String {
+    match outcome {
+        KeepAwakeOutcome::Kept { label } => format!("tab {label} is kept awake"),
+        KeepAwakeOutcome::Released { label } => format!("tab {label} can sleep again"),
+        KeepAwakeOutcome::Unchanged { kept: true, label } => {
+            format!("tab {label} was already kept awake")
+        }
+        KeepAwakeOutcome::Unchanged { kept: false, label } => {
+            format!("tab {label} could already sleep")
+        }
+    }
 }
 
 /// Run `herdr-sleep event`, the command of the focus hooks. Silent and always

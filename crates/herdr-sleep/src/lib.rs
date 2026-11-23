@@ -18,4 +18,5 @@ pub mod herdr;
 pub mod journal;
 pub mod ops;
 pub mod procs;
+pub mod tab_label;
 pub mod watcher;

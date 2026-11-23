@@ -40,6 +40,7 @@ pub const DEFAULT_IGNORE_CHILD_REGEX: [&str; 8] = [
 
 const DEFAULT_SLEEP_AFTER_MINUTES: u64 = 15;
 const DEFAULT_SLEEP_ICON: &str = "💤";
+const DEFAULT_KEEP_AWAKE_ICON: &str = "🔒";
 const DEFAULT_TOKEN_NAME: &str = "sleep";
 const DEFAULT_PREVIEW_LINES: u32 = 20;
 const MAX_PREVIEW_LINES: i64 = 200;
@@ -54,11 +55,12 @@ pub const DEFAULT_PROMPT_FRAME_REGEX: &str = r"^\s*\u{2500}[\u{2500}\s]{9,}$";
 
 const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 22] = [
+const TOP_LEVEL_KEYS: [&str; 23] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
     "sleep_icon",
+    "keep_awake_icon",
     "token_name",
     "tab_prefix",
     "preview_lines",
@@ -284,6 +286,8 @@ pub struct Config {
     pub sleep_statuses: Vec<AgentStatus>,
     pub dry_run: bool,
     pub sleep_icon: String,
+    /// Icon that prefixes the label of a tab kept awake; empty turns the feature off.
+    pub keep_awake_icon: String,
     pub token_name: String,
     pub tab_prefix: bool,
     pub preview_lines: u32,
@@ -335,6 +339,7 @@ struct RawConfig {
     sleep_statuses: Option<Vec<String>>,
     dry_run: Option<bool>,
     sleep_icon: Option<String>,
+    keep_awake_icon: Option<String>,
     token_name: Option<String>,
     tab_prefix: Option<bool>,
     preview_lines: Option<i64>,
@@ -654,6 +659,9 @@ impl Config {
             sleep_statuses,
             dry_run: raw.dry_run.unwrap_or(false),
             sleep_icon: raw.sleep_icon.unwrap_or_else(|| DEFAULT_SLEEP_ICON.into()),
+            keep_awake_icon: raw
+                .keep_awake_icon
+                .unwrap_or_else(|| DEFAULT_KEEP_AWAKE_ICON.into()),
             token_name,
             tab_prefix: raw.tab_prefix.unwrap_or(true),
             preview_lines: preview_lines as u32,
@@ -764,6 +772,10 @@ impl Config {
 
 # Icon shown in the sidebar for a sleeping agent.
 #sleep_icon = "{DEFAULT_SLEEP_ICON}"
+
+# Icon that prefixes the label of a tab kept awake with the keep-awake action. No agent of such a
+# tab goes to sleep. Empty turns the feature off.
+#keep_awake_icon = "{DEFAULT_KEEP_AWAKE_ICON}"
 
 # Name of the sidebar token (letters, digits, "_" and "-").
 #token_name = "{DEFAULT_TOKEN_NAME}"

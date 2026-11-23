@@ -15,6 +15,8 @@ Commands:
                               Put one agent to sleep
   wake [<pane|name>] [--no-wait] [--json]
                               Wake one sleeping agent
+  keep-awake [<pane|name>] [--on|--off]
+                              Keep the tab of a pane awake, or let it sleep again
   status [--json]             List the managed agents and the watcher
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
@@ -93,6 +95,28 @@ Exit codes:
   0  woken, not asleep, or woken a moment ago
   1  no such agent, or the wake failed
   2  usage error, or not ready after 120 s
+";
+
+const KEEP_AWAKE: &str = "\
+Usage: herdr-sleep keep-awake [<pane|name>] [--on|--off] [--]
+
+Keep the tab of a pane awake: its label gets the keep_awake_icon in front, and
+no agent of that tab goes to sleep, by sweep or by `sleep` (the tab-kept-awake
+refusal; `sleep --force` ignores it). Agents already asleep stay asleep.
+Running it again removes the icon, and so does renaming the tab without it.
+
+Without a pane or name the pane of the Herdr action context is used
+(HERDR_PLUGIN_CONTEXT_JSON pane_id, then focused_pane_id, then HERDR_PANE_ID).
+
+Options:
+  --on    Keep the tab awake (nothing changes when it already is)
+  --off   Let the tab sleep (nothing changes when it already can)
+  --      End of options; the next word is the target
+
+Exit codes:
+  0  done, or already in the asked state
+  1  no such pane or agent, or the tab could not be renamed
+  2  usage error
 ";
 
 const STATUS: &str = "\
@@ -220,6 +244,7 @@ pub fn command(name: &str) -> Option<&'static str> {
     Some(match name {
         "sleep" => SLEEP,
         "wake" => WAKE,
+        "keep-awake" => KEEP_AWAKE,
         "status" => STATUS,
         "sweep" => SWEEP,
         "config" => CONFIG,
@@ -287,6 +312,8 @@ Commands:
                               Put one agent to sleep
   wake [<pane|name>] [--no-wait] [--json]
                               Wake one sleeping agent
+  keep-awake [<pane|name>] [--on|--off]
+                              Keep the tab of a pane awake, or let it sleep again
   status [--json]             List the managed agents and the watcher
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)

@@ -5,6 +5,7 @@
 
 mod env;
 pub mod event;
+pub mod keep_awake;
 pub mod markers;
 pub mod registry;
 pub mod replay;
@@ -15,6 +16,7 @@ pub mod wake;
 
 pub use env::{Env, EnvResult, LiveEnv, PLACEHOLDER_BIN};
 pub use event::{ActionContext, EventOutcome, FocusEvent, FocusKind, handle_focus_event};
+pub use keep_awake::{KeepAwakeOutcome, keep_awake};
 pub use markers::{MarkerReport, MarkersState, resync_markers, sync_markers};
 pub use registry::{Registry, Sleeper};
 pub use replay::{ReplayArgs, ReplayOutcome, replay};

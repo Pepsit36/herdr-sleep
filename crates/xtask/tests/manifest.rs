@@ -86,9 +86,10 @@ fn manifest_events() {
 fn manifest_actions() {
     let m = manifest();
     let actions = tables(&m, "actions");
-    let expected: [(&str, &str, &[&str]); 5] = [
+    let expected: [(&str, &str, &[&str]); 6] = [
         ("sleep", "Sleep this agent", &["pane"]),
         ("wake", "Wake this agent", &["pane"]),
+        ("keep-awake", "Keep this tab awake (toggle)", &["pane"]),
         ("sweep", "Sleep idle agents now", &["global", "workspace"]),
         ("status", "Sleep status", &["global", "workspace"]),
         ("ensure-watcher", "Restart sleep watcher", &["global"]),
