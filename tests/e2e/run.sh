@@ -526,6 +526,30 @@ s14_action_refusal() {
   if is_awake_idle "$PANE_A"; then ok "alpha stays awake"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
 }
 
+s15_sleep_with_draft() {
+  new_world "$CONFIG_MANUAL" || return
+  local out rc
+  herdr pane send-text "$PANE_A" "my draft" >/dev/null 2>&1
+  sleep 1
+  # Off by default: the draft keeps the agent awake.
+  out="$(hs sleep alpha 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" == *draft-in-prompt* || "$out" == *"typed in the prompt"* ]]; then ok "a draft keeps the agent awake by default"; else bad "rc=$rc stderr='$out'"; fi
+  printf '%s\n' "$CONFIG_MANUAL" 'sleep_with_draft = true' >"$CONFIG_DIR/config.toml"
+  hs sleep alpha >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "alpha sleeps with a draft in its prompt"; else bad "alpha is '$(agent_kind "$PANE_A")' (stderr: $(hs sleep alpha 2>&1 >/dev/null))"; return; fi
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes"; else bad "alpha is '$(agent_kind "$PANE_A")' after the wake"; return; fi
+  has_draft() { screen "$PANE_A" | grep -q "my draft"; }
+  wait_for 20 has_draft
+  in_registry() { grep -q '"w1:p1"' "$STATE_DIR/sleepers.json" 2>/dev/null; }
+  not_in_registry() { ! in_registry; }
+  if wait_for 20 not_in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "w1:p1 is still in sleepers.json"; fi
+  local text
+  text="$(screen "$PANE_A")"
+  if [[ "$text" == *"my draft"* && "$text" != *"got: my draft"* ]]; then ok "the draft is back in the prompt, not submitted"; else bad "screen: $(tail -8 <<<"$text" | tr '\n' '|')"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -541,6 +565,7 @@ SCENARIOS=(
   "s12|prompt found under a tall status bar|s12_tall_status_bar"
   "s13|preview leaves out the input box and status bar|s13_preview_without_input_box"
   "s14|a refused action sleep explains itself|s14_action_refusal"
+  "s15|sleep with a draft saves and restores it|s15_sleep_with_draft"
 )
 
 # ---------------------------------------------------------------------------

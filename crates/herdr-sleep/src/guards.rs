@@ -328,9 +328,20 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         });
     }
 
-    match ctx.probe.screen().map(|s| prompt_state(&s, profile)) {
+    let screen = ctx.probe.screen();
+    match screen.as_deref().map(|s| prompt_state(s, profile)) {
         None | Some(PromptState::NotFound) => Err(Refusal::PromptNotDetected),
-        Some(PromptState::Draft) => Err(Refusal::DraftInPrompt),
+        Some(PromptState::Draft) => {
+            let saved = profile.sleep_with_draft
+                && screen
+                    .as_deref()
+                    .is_some_and(|s| matches!(read_draft(s, profile), Some(DraftRead::Text(_))));
+            if saved {
+                Ok(())
+            } else {
+                Err(Refusal::DraftInPrompt)
+            }
+        }
         Some(PromptState::Empty) => Ok(()),
     }
 }
@@ -486,8 +497,9 @@ fn is_box(c: char) -> bool {
     ('\u{2500}'..='\u{257F}').contains(&c)
 }
 
-/// The state of one line when it holds the prompt, `None` when it does not.
-fn line_state(line: &str, prompt: &Regex) -> Option<PromptState> {
+/// What a line holds when it is the prompt line: the text typed after the
+/// marker (grey suggestions left out). `None` when the line is not a prompt.
+fn line_input(line: &str, prompt: &Regex) -> Option<String> {
     let cells = parse_cells(line);
     // Skip indentation and a left box border, so `│ ❯ text │` matches too.
     let lead = cells
@@ -502,12 +514,64 @@ fn line_state(line: &str, prompt: &Regex) -> Option<PromptState> {
         .filter(|c| !c.dim)
         .map(|c| c.ch)
         .collect();
-    let input = input.trim_end_matches(|c| is_blank(c) || is_box(c));
+    Some(
+        input
+            .trim_end_matches(|c| is_blank(c) || is_box(c))
+            .to_string(),
+    )
+}
+
+/// The state of one line when it holds the prompt, `None` when it does not.
+fn line_state(line: &str, prompt: &Regex) -> Option<PromptState> {
+    let input = line_input(line, prompt)?;
     Some(if input.chars().any(|c| !is_blank(c)) {
         PromptState::Draft
     } else {
         PromptState::Empty
     })
+}
+
+/// A draft typed in the prompt, as far as the screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftRead {
+    /// The whole draft, on one row, safe to type back.
+    Text(String),
+    /// A draft the screen cannot give back faithfully: several rows (a long
+    /// line wrapped by the terminal looks like two lines), a pasted text the
+    /// agent shows as a summary, or control characters.
+    Unreadable,
+}
+
+/// The draft in the prompt of an ANSI screen. `None` when the prompt is empty
+/// or not found.
+pub fn read_draft(screen_ansi: &str, profile: &Profile) -> Option<DraftRead> {
+    let lines: Vec<&str> = screen_ansi
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let area = match framed_zone(&lines, profile) {
+        Some(zone) => zone,
+        None => &lines[lines.len().saturating_sub(profile.prompt_area_lines)..],
+    };
+    let row = area
+        .iter()
+        .rposition(|line| line_input(line, &profile.prompt_regex).is_some())?;
+    let input = line_input(area[row], &profile.prompt_regex)?;
+    let input = input.trim_start_matches(is_blank).to_string();
+    if input.is_empty() {
+        return None;
+    }
+    // Anything visible under the prompt row may be a second row of the draft.
+    let alone = area[row + 1..].iter().all(|line| {
+        parse_cells(line)
+            .iter()
+            .all(|c| is_blank(c.ch) || is_box(c.ch))
+    });
+    let summarised = input.contains("[Pasted text") || input.contains("[Image");
+    if !alone || summarised || input.chars().any(char::is_control) {
+        return Some(DraftRead::Unreadable);
+    }
+    Some(DraftRead::Text(input))
 }
 
 /// Split a line into visible characters with their dim flag. Dim is SGR 2,
@@ -723,6 +787,7 @@ mod tests {
     fn without_frame(kind: &str) -> Profile {
         Profile {
             prompt_frame_regex: None,
+            sleep_with_draft: false,
             ..profile(kind)
         }
     }
@@ -1348,6 +1413,57 @@ mod tests {
         let r = run(&config(), &agent(), &t, &p, SleepMode::Manual);
         assert_eq!(r, Err(Refusal::DraftInPrompt));
         assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Force), Ok(()));
+    }
+
+    /// Like `claude_screen`, with a frame long enough to be found.
+    fn framed_screen(prompt_line: &str) -> String {
+        let rule = "\u{2500}".repeat(12);
+        format!("  done\r\n\r\n{rule}\r\n{prompt_line}\r\n{rule}\r\n  auto mode on")
+    }
+
+    #[test]
+    fn a_one_row_draft_passes_only_when_it_may_be_saved() {
+        let p = probe(&framed_screen("\\e[0m\u{276F}\u{a0}half a thought"));
+        let t = table(&[]);
+        let mut c = config();
+        assert_eq!(
+            run(&c, &agent(), &t, &p, SleepMode::Manual),
+            Err(Refusal::DraftInPrompt)
+        );
+        c.profiles.get_mut("claude").unwrap().sleep_with_draft = true;
+        assert_eq!(run(&c, &agent(), &t, &p, SleepMode::Manual), Ok(()));
+        // A pasted text the agent summarises cannot be given back: still refused.
+        let pasted = probe(&framed_screen(
+            "\\e[0m\u{276F}\u{a0}[Pasted text #1 +20 lines]",
+        ));
+        assert_eq!(
+            run(&c, &agent(), &t, &pasted, SleepMode::Manual),
+            Err(Refusal::DraftInPrompt)
+        );
+    }
+
+    #[test]
+    fn reading_a_draft() {
+        let read = |screen: &str| read_draft(&esc(screen), &profile("claude"));
+        assert_eq!(
+            read(&framed_screen("\\e[0m\u{276F}\u{a0}fix the build")),
+            Some(DraftRead::Text("fix the build".into()))
+        );
+        // Nothing typed, or only a grey suggestion: no draft.
+        assert_eq!(read(&framed_screen("\\e[0m\u{276F}\u{a0}")), None);
+        assert_eq!(
+            read(&framed_screen(
+                "\\e[0m\u{276F}\u{a0}\\e[38;2;153;153;153msuggestion\\e[0m"
+            )),
+            None
+        );
+        // A second row inside the frame may belong to the draft.
+        let two_rows = framed_screen("\\e[0m\u{276F}\u{a0}first row\r\n  second row");
+        assert_eq!(read(&two_rows), Some(DraftRead::Unreadable));
+        assert_eq!(
+            read(&framed_screen("\\e[0m\u{276F}\u{a0}[Image #1]")),
+            Some(DraftRead::Unreadable)
+        );
     }
 
     #[test]

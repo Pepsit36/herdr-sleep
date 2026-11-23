@@ -212,6 +212,10 @@ fn main() {
                 typed.clear();
                 redraw(&mut out, &typed);
             }
+            0x15 => {
+                typed.clear();
+                redraw(&mut out, &typed);
+            }
             0x04 if typed.is_empty() => {
                 // Ctrl+D on an empty prompt does nothing, like a guarded REPL.
             }

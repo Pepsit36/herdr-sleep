@@ -14,6 +14,25 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+<!-- stamped -->
+
+### Added
+
+- **Drafts:** `sleep_with_draft = true` (global or per agent, off by default) puts an agent to sleep
+  even when a one-row draft is typed in its prompt. The draft is saved, the prompt cleared, and the
+  draft typed back, without Enter, when the agent wakes. A draft over several rows or a pasted text
+  still keeps the agent awake.
+
+### Fixed
+
+- **Wake:** the replay after a wake now uses the state directory of the placeholder that started
+  it, so the woken pane leaves the registry of sleeping panes and its journal lines land in the
+  right place even when the pane's environment names another state directory.
+- **Sleep:** a sleep that fails no longer leaves `/exit` typed in the prompt, which made the next
+  attempt type `/exit/exit`. The text is erased, and a saved draft is typed back.
+
 ## [0.3.4] - 2026-11-19
 
 <!-- stamped -->

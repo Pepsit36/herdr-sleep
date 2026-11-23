@@ -9,7 +9,7 @@ agent back with its own `--resume` the moment you focus the pane, press a key or
 What you typed while it was asleep is replayed into the agent once it is ready.
 
 - No signal is ever sent: the agent is asked to quit with its own exit command (`/exit`).
-- Nothing is lost: pane, position, name and session are kept; unsent drafts block the sleep.
+- Nothing is lost: pane, position, name and session are kept; an unsent one-row draft can be saved and typed back (`sleep_with_draft`), other drafts block the sleep.
 - One pane wakes at a time, never a whole tab or space, so waking does not spike memory.
 - Claude Code, Codex, Cursor and Gemini are built in; any other agent can be added in the config.
 
@@ -147,6 +147,12 @@ restore_settle_timeout_seconds = 60
 prompt_area_lines = 15
 prompt_frame_regex = '^\s*\u{2500}[\u{2500}\s]{9,}$'   # a line of at least ten "─"
 
+# Sleep an agent even when a draft is typed in its prompt: the draft is saved, the prompt cleared
+# (Ctrl+U), and the draft typed back, without Enter, when the agent wakes. Only a draft on one
+# row is saved; a longer draft or a pasted text keeps the agent awake (draft-in-prompt). Off by
+# default. Can be set per agent too.
+sleep_with_draft = false
+
 # Agents. Built in: claude, codex, cursor, gemini. A table overrides fields of a built-in
 # or adds an agent; a new agent needs all four keys.
 [agents.myagent]
@@ -188,7 +194,8 @@ is replayed into the agent once it is ready.
 ## Troubleshooting
 
 - **An agent never sleeps.** `herdr-sleep status` shows the last refusal per agent: `draft-in-prompt`
-  (text typed at the prompt), `busy-children` (a child process is running; add it to
+  (text typed at the prompt: set `sleep_with_draft = true` to sleep anyway and get a one-row draft
+  back at wake), `busy-children` (a child process is running; add it to
   `ignore_child_regex` if it is harmless), `prompt-not-detected` (the screen shows no prompt that
   matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess; the prompt
   is searched between the last two rules of the screen (`prompt_frame_regex`) and, without a frame,
