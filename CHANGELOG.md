@@ -14,6 +14,12 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Remote Control:** a Claude Code agent driven through Remote Control (started with
+  `--remote-control` or `--rc`, or showing the `/rc active` badge) no longer goes to sleep, by sweep
+  or by `sleep`. The refusal is `remote-control`; `sleep --force` still sleeps it.
+
 ## [0.4.0] - 2026-11-23
 
 <!-- stamped -->

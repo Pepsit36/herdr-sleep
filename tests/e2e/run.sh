@@ -550,6 +550,20 @@ s15_sleep_with_draft() {
   if [[ "$text" == *"my draft"* && "$text" != *"got: my draft"* ]]; then ok "the draft is back in the prompt, not submitted"; else bad "screen: $(tail -8 <<<"$text" | tr '\n' '|')"; fi
 }
 
+s16_remote_control() {
+  AGENT_PREFIX="FAKE_AGENT_STATUS_LINES=2 FAKE_AGENT_BADGE='/rc active' "
+  new_world "$CONFIG_MANUAL" || return
+  AGENT_PREFIX=""
+  local out rc
+  out="$(hs sleep alpha 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" == *remote-control* && "$out" == *"--force"* ]]; then ok "sleep refuses an agent in Remote Control and says why"; else bad "rc=$rc stderr='$out'"; fi
+  hs sweep --now >/dev/null 2>&1
+  if is_awake_idle "$PANE_A"; then ok "sweep --now leaves it awake"; else bad "alpha is '$(agent_kind "$PANE_A")' after sweep --now"; fi
+  hs sleep alpha --force >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "sleep --force ignores the guard"; else bad "alpha is '$(agent_kind "$PANE_A")' after sleep --force"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -566,6 +580,7 @@ SCENARIOS=(
   "s13|preview leaves out the input box and status bar|s13_preview_without_input_box"
   "s14|a refused action sleep explains itself|s14_action_refusal"
   "s15|sleep with a draft saves and restores it|s15_sleep_with_draft"
+  "s16|an agent in Remote Control stays awake|s16_remote_control"
 )
 
 # ---------------------------------------------------------------------------
