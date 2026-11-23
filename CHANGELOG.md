@@ -27,6 +27,9 @@ a published entry is frozen, typo included.
 
 ### Fixed
 
+- **Wake:** the replay after a wake now uses the state directory of the placeholder that started
+  it, so the woken pane leaves the registry of sleeping panes and its journal lines land in the
+  right place even when the pane's environment names another state directory.
 - **Sleep:** a sleep that fails no longer leaves `/exit` typed in the prompt, which made the next
   attempt type `/exit/exit`. The text is erased, and a saved draft is typed back.
 

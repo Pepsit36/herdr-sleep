@@ -45,7 +45,16 @@ pub enum ReplayOutcome {
 
 /// Wait for the Agent to be Ready, then type the Captured input into it.
 pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcome {
-    let Some(state_dir) = env.state_dir() else {
+    // The Placeholder's state directory (where the replay file is) is the one
+    // the Sleep wrote to. The environment this process inherited from the pane
+    // may point elsewhere, so it comes second.
+    let Some(state_dir) = args
+        .file
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env.state_dir())
+    else {
         return ReplayOutcome::Failed("no state directory".into());
     };
     if let Err(error) = std::fs::create_dir_all(&state_dir) {
@@ -92,10 +101,7 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
     }
     // The draft saved at Sleep comes back last, after what was typed in the
     // Placeholder, and is never submitted.
-    // Next to the replay file: the Placeholder's state directory is the one the
-    // Sleep wrote to, whatever environment this process inherited.
-    let draft_dir = args.file.parent().unwrap_or(&state_dir);
-    let draft_file = super::sleep::draft_path(draft_dir, pane);
+    let draft_file = super::sleep::draft_path(&state_dir, pane);
     if let Ok(draft) = std::fs::read_to_string(&draft_file) {
         let _ = std::fs::remove_file(&draft_file);
         if !draft.is_empty() {
@@ -179,6 +185,31 @@ mod tests {
         );
         assert!(!draft.exists());
         assert!(!fake.journal().contains("half a thought"));
+    }
+
+    #[test]
+    fn the_state_directory_is_the_one_of_the_replay_file() {
+        use crate::ops::registry::{Registry, Sleeper};
+        let (fake, mut args) = setup("other-dir", "hi");
+        // The file lives in the Placeholder's state directory, which is not the
+        // one this process's environment names.
+        let placeholder_dir = fake.state_dir.join("placeholder");
+        std::fs::create_dir_all(&placeholder_dir).unwrap();
+        let moved = placeholder_dir.join("replay-w1_p2.txt");
+        std::fs::rename(&args.file, &moved).unwrap();
+        args.file = moved;
+        let sleeper = Sleeper {
+            kind: "claude".into(),
+            session: "s".into(),
+            name: None,
+            cwd: "/".into(),
+            since_ms: 1,
+        };
+        Registry::add(&placeholder_dir, "w1:p2", sleeper).unwrap();
+        replay(&fake, &Config::default(), &args);
+        assert!(Registry::load(&placeholder_dir).panes.is_empty());
+        let journal = std::fs::read_to_string(placeholder_dir.join(crate::journal::FILE_NAME));
+        assert!(journal.unwrap().contains("REPLAY w1:p2"));
     }
 
     #[test]

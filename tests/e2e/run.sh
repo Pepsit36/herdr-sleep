@@ -542,6 +542,8 @@ s15_sleep_with_draft() {
   if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes"; else bad "alpha is '$(agent_kind "$PANE_A")' after the wake"; return; fi
   has_draft() { screen "$PANE_A" | grep -q "my draft"; }
   wait_for 20 has_draft
+  in_registry() { grep -q '"w1:p1"' "$STATE_DIR/sleepers.json" 2>/dev/null; }
+  if wait_for 20 ! in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "w1:p1 is still in sleepers.json"; fi
   local text
   text="$(screen "$PANE_A")"
   if [[ "$text" == *"my draft"* && "$text" != *"got: my draft"* ]]; then ok "the draft is back in the prompt, not submitted"; else bad "screen: $(tail -8 <<<"$text" | tr '\n' '|')"; fi
