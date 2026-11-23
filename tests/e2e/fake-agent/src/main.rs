@@ -152,8 +152,17 @@ fn rule() -> String {
 fn draw_box(out: &mut impl Write, typed: &str) {
     let _ = write!(out, "{}\r\n\u{276F}\u{a0}{typed}\r\n{}", rule(), rule());
     let status = status_lines();
+    // `FAKE_AGENT_BADGE` replaces the first status row, like the `/rc active` badge of Claude Code.
+    let badge = std::env::var("FAKE_AGENT_BADGE").ok();
     for row in 1..=status {
-        let _ = write!(out, "\r\n  status {row}");
+        match (&badge, row) {
+            (Some(badge), 1) => {
+                let _ = write!(out, "\r\n  {badge}");
+            }
+            _ => {
+                let _ = write!(out, "\r\n  status {row}");
+            }
+        }
     }
     let _ = write!(out, "\x1b[{}A\r\x1b[2K\u{276F}\u{a0}{typed}", status + 1);
     let _ = out.flush();

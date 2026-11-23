@@ -58,6 +58,7 @@ pub enum Refusal {
     NameExcluded(String),
     ScreenExcluded(String),
     CmdlineExcluded(String),
+    RemoteControl,
     CwdExcluded(String),
     AgentProcessNotFound,
     ProtectedEnv(String),
@@ -80,6 +81,7 @@ impl Refusal {
             Refusal::NameExcluded(_) => "excluded-name-regex",
             Refusal::ScreenExcluded(_) => "excluded-screen-regex",
             Refusal::CmdlineExcluded(_) => "excluded-cmdline-regex",
+            Refusal::RemoteControl => "remote-control",
             Refusal::CwdExcluded(_) => "cwd-excluded",
             Refusal::AgentProcessNotFound => "agent-process-not-found",
             Refusal::ProtectedEnv(_) => "protected-env",
@@ -124,6 +126,9 @@ impl fmt::Display for Refusal {
                     "excluded-cmdline-regex: a command line matches exclude_cmdline_regex ({command})"
                 )
             }
+            Refusal::RemoteControl => f.write_str(
+                "remote-control: Remote Control is active, so the agent is driven from another device",
+            ),
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
             Refusal::ProtectedEnv(var) => write!(f, "protected environment variable {var}"),
@@ -298,6 +303,9 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
     if let Some(line) = excluded_screen_line(ctx) {
         return Err(Refusal::ScreenExcluded(shorten(&line)));
     }
+    if agent.kind() == Some("claude") && remote_control_active(ctx, pid) {
+        return Err(Refusal::RemoteControl);
+    }
 
     if let Some(environment) = ctx.probe.environment(pid) {
         if let Some(var) = config
@@ -358,6 +366,31 @@ fn excluded_command<'t>(config: &Config, table: &'t ProcessTable, pid: i32) -> O
         .chain(table.descendants(pid))
         .map(|entry| entry.command.as_str())
         .find(|command| config.cmdline_excluded(command))
+}
+
+/// The badge Claude Code shows while Remote Control is connected.
+const REMOTE_CONTROL_BADGE: &str = "/rc active";
+
+/// Whether a Claude Code session is driven through Remote Control: it was
+/// started with `--remote-control` (or `--rc`), or the screen shows the
+/// `/rc active` badge in its last [`EXCLUDE_SCREEN_LINES`] lines. A terminal
+/// too narrow to draw the badge hides it, so only the flag protects then.
+fn remote_control_active(ctx: &GuardContext<'_>, pid: i32) -> bool {
+    let flagged = ctx.table.get(pid).is_some_and(|entry| {
+        entry.command.split_whitespace().any(|word| {
+            let name = word.split('=').next().unwrap_or(word);
+            name == "--remote-control" || name == "--rc"
+        })
+    });
+    flagged
+        || ctx.probe.screen().is_some_and(|screen| {
+            let lines: Vec<&str> = screen.split('\n').collect();
+            let start = lines.len().saturating_sub(EXCLUDE_SCREEN_LINES);
+            lines[start..].iter().any(|line| {
+                let plain: String = parse_cells(line).iter().map(|c| c.ch).collect();
+                plain.to_lowercase().contains(REMOTE_CONTROL_BADGE)
+            })
+        })
 }
 
 /// The first of the last [`EXCLUDE_SCREEN_LINES`] screen lines, without colours,
@@ -1261,6 +1294,46 @@ mod tests {
         let c = with_regex(|c, r| c.exclude_screen_regex = r, "x");
         let r = run(&c, &agent(), &table(&[]), &p, SleepMode::Sweep);
         assert_eq!(r, Err(Refusal::PromptNotDetected));
+    }
+
+    #[test]
+    fn remote_control_keeps_a_claude_awake() {
+        let t = table(&[]);
+        let badge = format!("  \\e[2m/rc active\\e[0m\r\n{}", empty_screen());
+        let r = run(&config(), &agent(), &t, &probe(&badge), SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::RemoteControl));
+        assert_eq!(r.unwrap_err().code(), "remote-control");
+        // Manual sleep is refused too, a forced one is not.
+        let p = probe(&badge);
+        assert_eq!(
+            run(&config(), &agent(), &t, &p, SleepMode::Manual),
+            Err(Refusal::RemoteControl)
+        );
+        assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Force), Ok(()));
+        // Without the badge the agent sleeps.
+        let p = probe(&empty_screen());
+        assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Sweep), Ok(()));
+    }
+
+    #[test]
+    fn the_remote_control_flag_is_enough_when_the_badge_is_hidden() {
+        let p = probe(&empty_screen());
+        for flag in ["--remote-control", "--rc", "--remote-control=work"] {
+            let text = format!("50 1 100 -bash\n100 50 5000 claude {flag}\n");
+            let r = run(
+                &config(),
+                &agent(),
+                &ProcessTable::parse(&text),
+                &p,
+                SleepMode::Sweep,
+            );
+            assert_eq!(r, Err(Refusal::RemoteControl), "{flag}");
+        }
+        let other = ProcessTable::parse("50 1 100 -bash\n100 50 5000 claude --rcfile x\n");
+        assert_eq!(
+            run(&config(), &agent(), &other, &p, SleepMode::Sweep),
+            Ok(())
+        );
     }
 
     #[test]

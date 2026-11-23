@@ -203,6 +203,10 @@ is replayed into the agent once it is ready.
   your agent draws its prompt differently),
   `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
   first message: it could not be resumed, so the agent is left alone and retried later), and so on.
+- **A Claude Code agent in Remote Control stays awake.** `remote-control` means the agent was
+  started with `--remote-control` (or `--rc`), or its screen shows the `/rc active` badge: it is
+  driven from another device, so putting it to sleep would cut that session. A terminal too narrow
+  to draw the badge hides it, and only the flag protects then. `sleep --force` ignores it.
 - **An agent stays awake on purpose.** `excluded-name-regex`, `excluded-screen-regex` and
   `excluded-cmdline-regex` mean one of your `exclude_name_regex`, `exclude_screen_regex` or
   `exclude_cmdline_regex` patterns matched; the refusal names the text that matched. These patterns
