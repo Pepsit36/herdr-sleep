@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-23
+
+<!-- stamped -->
+
 ### Added
 
 - **Drafts:** `sleep_with_draft = true` (global or per agent, off by default) puts an agent to sleep
