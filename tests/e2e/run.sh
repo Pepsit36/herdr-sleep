@@ -543,7 +543,8 @@ s15_sleep_with_draft() {
   has_draft() { screen "$PANE_A" | grep -q "my draft"; }
   wait_for 20 has_draft
   in_registry() { grep -q '"w1:p1"' "$STATE_DIR/sleepers.json" 2>/dev/null; }
-  if wait_for 20 ! in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "w1:p1 is still in sleepers.json"; fi
+  not_in_registry() { ! in_registry; }
+  if wait_for 20 not_in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "w1:p1 is still in sleepers.json"; fi
   local text
   text="$(screen "$PANE_A")"
   if [[ "$text" == *"my draft"* && "$text" != *"got: my draft"* ]]; then ok "the draft is back in the prompt, not submitted"; else bad "screen: $(tail -8 <<<"$text" | tr '\n' '|')"; fi
