@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
+<!-- stamped -->
+
 ### Added
 
 - **Keep a tab awake:** the new `keep-awake` action (bind it to a key) puts `keep_awake_icon` (🔒)
