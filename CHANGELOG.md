@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
+<!-- stamped -->
+
 ### Added
 
 - **Remote Control:** a Claude Code agent driven through Remote Control (started with
