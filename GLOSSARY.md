@@ -37,7 +37,7 @@ How long an Agent has been Settled, unfocused and unchanged, measured by the Wat
 _Avoid_: Inactivity, age
 
 **Guard**:
-A condition that forbids sleep even when the Idle time is reached (working, focused, typed draft, busy children, protected environment, unrecognised prompt, or a name, screen or command line the user excluded by pattern).
+A condition that forbids sleep even when the Idle time is reached (working, focused, typed draft that is not saved, busy children, protected environment, unrecognised prompt, or a name, screen or command line the user excluded by pattern).
 _Avoid_: Check, filter, rule
 
 **Sleep**:
@@ -75,6 +75,10 @@ _Avoid_: Wake source, wake-up event
 **Captured input**:
 Keyboard or pasted text received by the Placeholder before the Agent is Ready, stripped of control and escape sequences.
 _Avoid_: Buffered input, queued keys
+
+**Saved draft**:
+The text typed in the Agent's prompt when it goes to sleep, kept while the pane sleeps and typed back, never submitted, once the Agent is Ready.
+_Avoid_: Backup, stash
 
 **Replay**:
 Sending the Captured input to the Agent once it is Ready.

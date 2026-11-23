@@ -54,7 +54,7 @@ pub const DEFAULT_PROMPT_FRAME_REGEX: &str = r"^\s*\u{2500}[\u{2500}\s]{9,}$";
 
 const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 21] = [
+const TOP_LEVEL_KEYS: [&str; 22] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
@@ -70,6 +70,7 @@ const TOP_LEVEL_KEYS: [&str; 21] = [
     "ignore_child_regex",
     "prompt_area_lines",
     "prompt_frame_regex",
+    "sleep_with_draft",
     "exclude_name_regex",
     "exclude_screen_regex",
     "exclude_cmdline_regex",
@@ -78,13 +79,14 @@ const TOP_LEVEL_KEYS: [&str; 21] = [
     "agents",
 ];
 
-const AGENT_KEYS: [&str; 6] = [
+const AGENT_KEYS: [&str; 7] = [
     "bin",
     "exit",
     "resume",
     "prompt_regex",
     "prompt_area_lines",
     "prompt_frame_regex",
+    "sleep_with_draft",
 ];
 
 // ---------------------------------------------------------------------------
@@ -206,6 +208,9 @@ pub struct Profile {
     /// detection off.
     #[serde(serialize_with = "ser_opt_regex")]
     pub prompt_frame_regex: Option<Regex>,
+    /// Whether a one-row draft in the prompt is saved, the prompt cleared, and the draft typed
+    /// back when the agent wakes, instead of refusing to sleep.
+    pub sleep_with_draft: bool,
 }
 
 impl Profile {
@@ -303,6 +308,8 @@ pub struct Config {
     /// Default of every Profile's `prompt_frame_regex`.
     #[serde(serialize_with = "ser_opt_regex")]
     pub prompt_frame_regex: Option<Regex>,
+    /// Default of every Profile's `sleep_with_draft`.
+    pub sleep_with_draft: bool,
     /// Managed Profiles by Kind: built-ins with overrides plus custom kinds.
     pub profiles: BTreeMap<String, Profile>,
     /// Non-fatal findings (unknown keys, unmanaged custom kinds).
@@ -342,6 +349,7 @@ struct RawConfig {
     exclude_cmdline_regex: Option<Vec<String>>,
     prompt_area_lines: Option<i64>,
     prompt_frame_regex: Option<String>,
+    sleep_with_draft: Option<bool>,
     sweep_interval_seconds: Option<i64>,
     restore_settle_timeout_seconds: Option<i64>,
     agents: BTreeMap<String, RawAgent>,
@@ -356,12 +364,14 @@ struct RawAgent {
     prompt_regex: Option<String>,
     prompt_area_lines: Option<i64>,
     prompt_frame_regex: Option<String>,
+    sleep_with_draft: Option<bool>,
 }
 
 /// The prompt detection settings every Profile starts from.
 struct PromptDefaults {
     area_lines: usize,
     frame_regex: Option<Regex>,
+    sleep_with_draft: bool,
 }
 
 fn check_area_lines(key: &str, lines: i64) -> Result<usize, ConfigError> {
@@ -628,9 +638,11 @@ impl Config {
             Some(pattern) => compile_frame("prompt_frame_regex", pattern)?,
             None => Some(compile("prompt_frame_regex", DEFAULT_PROMPT_FRAME_REGEX)?),
         };
+        let sleep_with_draft = raw.sleep_with_draft.unwrap_or(false);
         let defaults = PromptDefaults {
             area_lines: prompt_area_lines,
             frame_regex: prompt_frame_regex.clone(),
+            sleep_with_draft,
         };
 
         let profiles = build_profiles(raw.agents, &defaults, &mut warnings)?;
@@ -658,6 +670,7 @@ impl Config {
             restore_settle_timeout_seconds: settle as u64,
             prompt_area_lines,
             prompt_frame_regex,
+            sleep_with_draft,
             profiles,
             warnings,
         })
@@ -807,6 +820,11 @@ impl Config {
 # settable per agent kind.
 #prompt_frame_regex = '{DEFAULT_PROMPT_FRAME_REGEX}'
 
+# Put an agent to sleep even when a one-row draft is typed in its prompt: the draft is saved,
+# the prompt cleared, and the draft typed back (without Enter) when the agent wakes. A draft
+# over several rows, or a pasted text, still keeps the agent awake. Also settable per agent kind.
+#sleep_with_draft = false
+
 # Per-kind profiles. A table overrides single fields of a built-in kind (claude,
 # codex, cursor, gemini) or defines a new kind, which needs all four fields.
 # [agents.myagent]
@@ -854,6 +872,7 @@ fn build_profiles(
             )?,
             prompt_area_lines: prompt_area_lines(&key, over.prompt_area_lines, defaults)?,
             prompt_frame_regex: prompt_frame_regex(&key, over.prompt_frame_regex, defaults)?,
+            sleep_with_draft: over.sleep_with_draft.unwrap_or(defaults.sleep_with_draft),
         };
         profiles.insert(profile.kind.clone(), profile);
     }
@@ -905,6 +924,7 @@ fn build_profiles(
                     prompt_regex,
                     prompt_area_lines: area_lines,
                     prompt_frame_regex: frame_regex,
+                    sleep_with_draft: over.sleep_with_draft.unwrap_or(defaults.sleep_with_draft),
                 },
             );
         } else {
@@ -1342,6 +1362,18 @@ exclude_names = ["b"]"#);
         let c = Config::load_with_env(|k| (k == "HERDR_SLEEP_CONFIG_DIR").then(|| dir_s.clone()))
             .unwrap();
         assert_eq!(c.sleep_after_minutes, 15);
+    }
+
+    #[test]
+    fn sleep_with_draft_is_off_by_default_and_per_agent() {
+        let c = Config::default();
+        assert!(!c.sleep_with_draft && !c.profile("claude").unwrap().sleep_with_draft);
+        let c = Config::from_toml_str(
+            "sleep_with_draft = true\n[agents.codex]\nsleep_with_draft = false",
+        )
+        .unwrap();
+        assert!(c.profile("claude").unwrap().sleep_with_draft);
+        assert!(!c.profile("codex").unwrap().sleep_with_draft);
     }
 
     #[test]

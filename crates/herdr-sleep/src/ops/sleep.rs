@@ -218,13 +218,38 @@ pub fn sleep_agent(
     let preview = write_preview(env, config, profile, pane, &state_dir);
     let freed_kb = env.agent_rss_kb(agent, &profile.bin).unwrap_or(0);
 
+    // 3b. A draft in the prompt is saved and the prompt cleared, so the exit
+    // command is typed into an empty prompt. The draft is typed back at Wake.
+    let draft = if profile.sleep_with_draft {
+        match take_draft(env, profile, pane, &state_dir) {
+            Ok(draft) => draft,
+            Err(reason) => return abort(reason),
+        }
+    } else {
+        None
+    };
+    if let Some(text) = &draft {
+        journal.log("DRAFT", &format!("{pane} saved bytes={}", text.len()));
+    }
+    let undo = |typed_exit: bool| {
+        undo_typing(
+            env,
+            pane,
+            &state_dir,
+            typed_exit.then_some(profile.exit.as_str()),
+            draft.as_deref(),
+        );
+    };
+
     // 4. Quit the agent through its exit command.
     journal.log("SLEEP", &format!("{label} ({pane}) kind={kind}"));
     if let Err(error) = env.send_text(pane, &profile.exit) {
+        undo(false);
         return abort(format!("cannot type the exit command: {error}"));
     }
     env.sleep(KEY_DELAY);
     if let Err(error) = env.send_keys(pane, &["enter"]) {
+        undo(true);
         return abort(format!("cannot press Enter: {error}"));
     }
     let mut second_enter = false;
@@ -239,6 +264,7 @@ pub fn sleep_agent(
         false
     });
     if !quit {
+        undo(true);
         return abort(format!(
             "agent still running after {}s",
             QUIT_TIMEOUT.as_secs()
@@ -384,6 +410,68 @@ fn notification_text(icon: &str, label: &str, kind: &str, freed_mb: u64) -> Stri
         text.push_str(&format!(", freed {freed_mb} MB"));
     }
     text
+}
+
+/// The file holding the draft saved at Sleep, typed back at Wake.
+pub(super) fn draft_path(state_dir: &Path, pane: &str) -> std::path::PathBuf {
+    state_dir.join(format!("draft-{}.txt", super::wake::sanitize_pane(pane)))
+}
+
+/// Save the draft of the prompt in [`draft_path`] and clear the prompt (Ctrl+U),
+/// checking on screen that it is empty. `Ok(None)` when there is no draft. An
+/// error leaves the draft where it was: nothing is lost.
+fn take_draft(
+    env: &dyn Env,
+    profile: &Profile,
+    pane: &str,
+    state_dir: &Path,
+) -> Result<Option<String>, String> {
+    let path = draft_path(state_dir, pane);
+    let screen = env
+        .screen_ansi(pane, guards::SCREEN_LINES)
+        .map_err(|error| format!("cannot read the screen: {error}"))?;
+    let text = match guards::read_draft(&screen, profile) {
+        None => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(None);
+        }
+        Some(guards::DraftRead::Unreadable) => {
+            return Err("the draft in the prompt cannot be read reliably, so it is kept".into());
+        }
+        Some(guards::DraftRead::Text(text)) => text,
+    };
+    std::fs::write(&path, &text).map_err(|error| format!("cannot save the draft: {error}"))?;
+    let cleared = env.send_keys(pane, &["ctrl+u"]).is_ok() && {
+        env.sleep(KEY_DELAY);
+        env.screen_ansi(pane, guards::SCREEN_LINES)
+            .is_ok_and(|screen| {
+                guards::prompt_state(&screen, profile) == guards::PromptState::Empty
+            })
+    };
+    if !cleared {
+        let _ = std::fs::remove_file(&path);
+        return Err("cannot clear the draft from the prompt, so it is kept".into());
+    }
+    Ok(Some(text))
+}
+
+/// After a Sleep that failed: erase the exit command typed in the prompt
+/// (one Backspace per character) and type the saved draft back.
+fn undo_typing(
+    env: &dyn Env,
+    pane: &str,
+    state_dir: &Path,
+    exit: Option<&str>,
+    draft: Option<&str>,
+) {
+    if let Some(exit) = exit {
+        let backspaces = vec!["backspace"; exit.chars().count()];
+        let _ = env.send_keys(pane, &backspaces);
+    }
+    if let Some(text) = draft {
+        let _ = env.send_text(pane, text);
+        let _ = std::fs::remove_file(draft_path(state_dir, pane));
+    }
 }
 
 /// Capture the Preview into `<state_dir>/preview-<pane>.txt`: the last
@@ -550,6 +638,9 @@ mod tests {
         quit_at: Cell<Option<Duration>>,
         exec_at: Cell<Option<Duration>>,
         agent: Agent,
+        /// What the screen shows once Ctrl+U was pressed, when it matters.
+        cleared_screen: Option<String>,
+        cleared: Cell<bool>,
     }
 
     impl Fake {
@@ -578,6 +669,8 @@ mod tests {
                 enters: Cell::new(0),
                 quit_at: Cell::new(None),
                 exec_at: Cell::new(None),
+                cleared_screen: None,
+                cleared: Cell::new(false),
                 agent: Agent {
                     pane_id: "w1-2".into(),
                     name: Some("worker".into()),
@@ -690,7 +783,10 @@ mod tests {
 
         fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String> {
             self.log(format!("read-ansi {pane} {lines}"));
-            self.screen.clone()
+            match (&self.cleared_screen, self.cleared.get()) {
+                (Some(screen), true) => Ok(screen.clone()),
+                _ => self.screen.clone(),
+            }
         }
 
         fn rename_agent(&self, pane: &str, name: &str) -> EnvResult<()> {
@@ -705,10 +801,15 @@ mod tests {
 
         fn send_keys(&self, pane: &str, keys: &[&str]) -> EnvResult<()> {
             self.log(format!("keys {pane} {}", keys.join(" ")));
-            let enters = self.enters.get() + 1;
-            self.enters.set(enters);
-            if enters == self.enters_needed {
-                self.quit_at.set(Some(self.clock()));
+            if keys.contains(&"ctrl+u") {
+                self.cleared.set(true);
+            }
+            if keys.contains(&"enter") {
+                let enters = self.enters.get() + 1;
+                self.enters.set(enters);
+                if enters == self.enters_needed {
+                    self.quit_at.set(Some(self.clock()));
+                }
             }
             Ok(())
         }
@@ -1007,16 +1108,121 @@ mod tests {
             outcome,
             SleepOutcome::Aborted("agent still running after 20s".into())
         );
-        let enters: Vec<_> = fake
+        let keys: Vec<_> = fake
             .calls()
             .into_iter()
             .filter(|c| c.starts_with("keys"))
             .collect();
-        assert_eq!(enters.len(), 2, "one Enter, then one retry");
+        assert_eq!(
+            keys,
+            [
+                "keys w1-2 enter",
+                "keys w1-2 enter",
+                "keys w1-2 backspace backspace backspace backspace backspace"
+            ],
+            "one Enter, one retry, then the typed /exit is erased"
+        );
         assert!(exec_call(&fake).is_none());
         assert!(!fake.calls().iter().any(|c| c.starts_with("pane ")));
         assert!(fake.clock() >= QUIT_TIMEOUT);
         assert!(fake.journal().contains(" ABORT worker (w1-2): agent still"));
+    }
+
+    const RULE: &str =
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}";
+
+    fn framed(prompt_lines: &[&str]) -> String {
+        format!(
+            "  done\n\n{RULE}\n{}\n{RULE}\n  status\n",
+            prompt_lines.join("\n")
+        )
+    }
+
+    fn with_drafts() -> Config {
+        Config::from_toml_str("sleep_with_draft = true").unwrap()
+    }
+
+    /// A Fake showing `draft` in the prompt until Ctrl+U clears it.
+    fn drafting(name: &str, draft: &str) -> Fake {
+        let mut fake = Fake::new(name);
+        fake.screen = Ok(framed(&[&format!("\u{276F} {draft}")]));
+        fake.cleared_screen = Some(framed(&["\u{276F} "]));
+        fake
+    }
+
+    #[test]
+    fn a_draft_is_saved_the_prompt_cleared_and_exit_typed_into_it() {
+        let fake = drafting("draft", "half a thought");
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(
+            matches!(outcome, SleepOutcome::Asleep { .. }),
+            "{outcome:?}"
+        );
+        let calls = fake.calls();
+        let at = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
+        assert!(at("keys w1-2 ctrl+u") < at("text w1-2 /exit"));
+        assert_eq!(
+            std::fs::read_to_string(fake.dir().join("draft-w1-2.txt")).unwrap(),
+            "half a thought"
+        );
+        assert!(!fake.journal().contains("half a thought"));
+    }
+
+    #[test]
+    fn a_failed_sleep_erases_the_exit_and_types_the_draft_back() {
+        let mut fake = drafting("draft-undo", "half a thought");
+        fake.quit_after = None;
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(matches!(outcome, SleepOutcome::Aborted(_)), "{outcome:?}");
+        let calls = fake.calls();
+        let last_keys = calls.iter().rposition(|c| c.starts_with("keys")).unwrap();
+        assert_eq!(
+            calls[last_keys],
+            "keys w1-2 backspace backspace backspace backspace backspace"
+        );
+        assert_eq!(calls.last().unwrap(), "text w1-2 half a thought");
+        assert!(!fake.dir().join("draft-w1-2.txt").exists());
+    }
+
+    #[test]
+    fn a_draft_that_cannot_be_cleared_is_kept_and_nothing_is_typed() {
+        let mut fake = drafting("draft-stuck", "half a thought");
+        fake.cleared_screen = None;
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(
+            matches!(&outcome, SleepOutcome::Aborted(m) if m.contains("cannot clear")),
+            "{outcome:?}"
+        );
+        assert!(!fake.calls().iter().any(|c| c.starts_with("text")));
+        assert!(!fake.dir().join("draft-w1-2.txt").exists());
+    }
+
+    #[test]
+    fn a_wrapped_draft_is_kept_untouched() {
+        let mut fake = Fake::new("draft-wrapped");
+        fake.screen = Ok(framed(&[
+            "\u{276F} a long line that",
+            "  the terminal wrapped",
+        ]));
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(
+            matches!(&outcome, SleepOutcome::Aborted(m) if m.contains("cannot be read reliably")),
+            "{outcome:?}"
+        );
+        assert!(
+            !fake
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("text") || c.starts_with("keys"))
+        );
+    }
+
+    #[test]
+    fn without_the_setting_the_draft_is_left_alone() {
+        let fake = drafting("draft-off", "half a thought");
+        run(&fake, SleepMode::Force);
+        assert!(!fake.calls().iter().any(|c| c.contains("ctrl+u")));
+        assert!(!fake.dir().join("draft-w1-2.txt").exists());
     }
 
     #[test]

@@ -11,3 +11,4 @@ Most sleep plugins send `SIGTERM`. That skips the agent's shutdown path and disc
 
 - Agents whose prompt line is not recognised never sleep; the reason is visible in `status` and the log.
 - Each Profile needs a reliable `prompt_regex`; unverified built-ins are documented as such.
+- A draft keeps the agent awake unless the user opts into saving it (ADR 0010).

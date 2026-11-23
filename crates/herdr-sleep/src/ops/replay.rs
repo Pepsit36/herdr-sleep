@@ -90,6 +90,21 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
             return ReplayOutcome::Failed(format!("cannot press Enter: {error}"));
         }
     }
+    // The draft saved at Sleep comes back last, after what was typed in the
+    // Placeholder, and is never submitted.
+    // Next to the replay file: the Placeholder's state directory is the one the
+    // Sleep wrote to, whatever environment this process inherited.
+    let draft_dir = args.file.parent().unwrap_or(&state_dir);
+    let draft_file = super::sleep::draft_path(draft_dir, pane);
+    if let Ok(draft) = std::fs::read_to_string(&draft_file) {
+        let _ = std::fs::remove_file(&draft_file);
+        if !draft.is_empty() {
+            if let Err(error) = env.send_text(pane, &draft) {
+                return ReplayOutcome::Failed(format!("cannot type the draft back: {error}"));
+            }
+            journal.log("DRAFT", &format!("{pane} restored bytes={}", draft.len()));
+        }
+    }
     journal.log("REPLAY", &format!("{pane} bytes={bytes}"));
     ReplayOutcome::Replayed { bytes }
 }
@@ -139,6 +154,31 @@ mod tests {
         assert_eq!(fake.clock(), Duration::from_millis(3300));
         assert_eq!(fake.events(), ["REPLAY"]);
         assert!(fake.journal().trim_end().ends_with("REPLAY w1:p2 bytes=13"));
+    }
+
+    #[test]
+    fn the_saved_draft_is_typed_back_after_the_text_and_never_submitted() {
+        let (fake, args) = setup("draft", "fix the build");
+        let draft = super::super::sleep::draft_path(&fake.state_dir, "w1:p2");
+        std::fs::write(&draft, "half a thought").unwrap();
+        replay(&fake, &Config::default(), &args);
+        let calls = fake.calls();
+        let tail: Vec<&str> = calls
+            .iter()
+            .skip_while(|c| !c.starts_with("rename"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                "rename w1:p2 worker",
+                "text w1:p2 fix the build",
+                "keys w1:p2 enter",
+                "text w1:p2 half a thought"
+            ]
+        );
+        assert!(!draft.exists());
+        assert!(!fake.journal().contains("half a thought"));
     }
 
     #[test]
