@@ -76,6 +76,10 @@ _Avoid_: Wake source, wake-up event
 Keyboard or pasted text received by the Placeholder before the Agent is Ready, stripped of control and escape sequences.
 _Avoid_: Buffered input, queued keys
 
+**Remote Control**:
+The mode where a Claude Code Agent is driven from another device. An Agent in Remote Control never sleeps unless forced.
+_Avoid_: Remote session, rc
+
 **Saved draft**:
 The text typed in the Agent's prompt when it goes to sleep, kept while the pane sleeps and typed back, never submitted, once the Agent is Ready.
 _Avoid_: Backup, stash
