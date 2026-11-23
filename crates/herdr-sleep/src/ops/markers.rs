@@ -448,11 +448,16 @@ mod tests {
                 ..Snapshot::default()
             })
         }
-        fn pane(&self, _: &str) -> EnvResult<Pane> {
-            unreachable!()
+        fn pane(&self, target: &str) -> EnvResult<Pane> {
+            Err(format!("no pane {target}"))
         }
-        fn agent(&self, _: &str) -> EnvResult<Agent> {
-            unreachable!()
+        fn agent(&self, target: &str) -> EnvResult<Agent> {
+            self.agents
+                .borrow()
+                .iter()
+                .find(|a| a.pane_id == target)
+                .cloned()
+                .ok_or_else(|| format!("no agent {target}"))
         }
         fn process_info(&self, _: &str) -> EnvResult<ProcessInfo> {
             unreachable!()
@@ -547,6 +552,49 @@ mod tests {
         fake.agent("w1:p1", "w1", "w1:t1", "sleeping-claude");
         fake.agent("w1:p2", "w1", "w1:t1", "sleeping-claude");
         fake
+    }
+
+    #[test]
+    fn keeping_a_tab_awake_toggles_the_icon_and_keeps_the_sleep_prefix_first() {
+        use super::super::keep_awake::{KeepAwakeOutcome, keep_awake};
+        let config = Config::default();
+        let fake = two_agents("keep-awake");
+        fake.set_label("w1:p2", "claude");
+        // An awake tab gets the lock, and asking again with --on changes nothing.
+        let outcome = keep_awake(&fake, &config, "w1:p1", None).unwrap();
+        assert_eq!(
+            outcome,
+            KeepAwakeOutcome::Kept {
+                label: "\u{1f512} build".into()
+            }
+        );
+        assert_eq!(fake.label_of("w1:t1"), "\u{1f512} build");
+        assert!(matches!(
+            keep_awake(&fake, &config, "w1:p1", Some(true)).unwrap(),
+            KeepAwakeOutcome::Unchanged { kept: true, .. }
+        ));
+        // Once every agent sleeps the sleep prefix goes in front of the lock,
+        // and is removed alone at the next wake.
+        fake.set_label("w1:p2", "sleeping-claude");
+        sync_markers(&fake, &config);
+        assert_eq!(fake.label_of("w1:t1"), "\u{1f4a4} \u{1f512} build");
+        fake.set_label("w1:p2", "claude");
+        sync_markers(&fake, &config);
+        assert_eq!(fake.label_of("w1:t1"), "\u{1f512} build");
+        // The same action lifts the protection.
+        let outcome = keep_awake(&fake, &config, "w1:p1", None).unwrap();
+        assert!(matches!(outcome, KeepAwakeOutcome::Released { .. }));
+        assert_eq!(fake.label_of("w1:t1"), "build");
+    }
+
+    #[test]
+    fn keeping_a_tab_awake_needs_an_icon_and_a_known_pane() {
+        use super::super::keep_awake::keep_awake;
+        let fake = two_agents("keep-awake-errors");
+        let off = Config::from_toml_str("keep_awake_icon = \"\"").unwrap();
+        assert!(keep_awake(&fake, &off, "w1:p1", None).is_err());
+        assert!(keep_awake(&fake, &Config::default(), "w9:p9", None).is_err());
+        assert!(fake.renames.borrow().is_empty());
     }
 
     #[test]

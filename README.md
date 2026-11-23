@@ -95,6 +95,24 @@ a Herdr notification that says why and what to try, since nothing would be print
 can see. It is always shown for the action, whatever `notify` says: `notify` only concerns the
 sleep that happens by itself.
 
+### Keep a tab awake
+
+Bind the `keep-awake` action to stop a tab from ever sleeping, and again to let it sleep:
+
+```toml
+[[keys.command]]
+key = "prefix+k"
+type = "plugin_action"
+command = "pepsit36.herdr-sleep.keep-awake"
+description = "keep this tab awake (toggle)"
+```
+
+The label of the tab of the focused pane gets the `keep_awake_icon` (🔒) in front, and none of its
+agents goes to sleep, by sweep or by `sleep` (`tab-kept-awake`; `sleep --force` ignores it). Agents
+that already sleep stay asleep. The icon in the label is the whole state: it survives a Herdr
+restart, and renaming the tab without it lifts the protection. From a terminal:
+`herdr-sleep keep-awake [<pane|name>] [--on|--off]`.
+
 The other actions are `wake`, `sweep` (sleep every idle agent now), `status` and `ensure-watcher`,
 all available from Herdr's action picker.
 
@@ -115,6 +133,7 @@ dry_run = false
 sleep_icon = "💤"
 token_name = "sleep"        # shown as $sleep in sidebar rows
 tab_prefix = true           # prefix the label of a tab whose agents all sleep
+keep_awake_icon = "🔒"      # prefix of a tab kept awake with the keep-awake action ("" turns it off)
 preview_lines = 20          # last lines above the input box kept on the sleeping pane
 notify = true               # Herdr notification when an agent falls asleep by itself
 
@@ -203,6 +222,8 @@ is replayed into the agent once it is ready.
   your agent draws its prompt differently),
   `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
   first message: it could not be resumed, so the agent is left alone and retried later), and so on.
+- **A tab never sleeps.** `tab-kept-awake` means its label starts with the `keep_awake_icon`: run
+  the `keep-awake` action again, or rename the tab without the icon.
 - **A Claude Code agent in Remote Control stays awake.** `remote-control` means the agent was
   started with `--remote-control` (or `--rc`), or its screen shows the `/rc active` badge: it is
   driven from another device, so putting it to sleep would cut that session. A terminal too narrow

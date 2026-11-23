@@ -41,6 +41,12 @@ contexts = ["pane"]
 command = ["bin/herdr-sleep", "wake"]
 
 [[actions]]
+id = "keep-awake"
+title = "Keep this tab awake (toggle)"
+contexts = ["pane"]
+command = ["bin/herdr-sleep", "keep-awake"]
+
+[[actions]]
 id = "sweep"
 title = "Sleep idle agents now"
 contexts = ["global", "workspace"]

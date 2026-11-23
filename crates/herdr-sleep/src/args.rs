@@ -11,11 +11,12 @@ use std::path::PathBuf;
 use herdr_sleep::ops::ReplayArgs;
 
 /// Every command name, internal ones included.
-pub const COMMANDS: [&str; 10] = [
+pub const COMMANDS: [&str; 11] = [
     "watch",
     "sweep",
     "sleep",
     "wake",
+    "keep-awake",
     "status",
     "config",
     "event",
@@ -44,6 +45,11 @@ pub enum Invocation {
         target: Option<String>,
         wait: bool,
         json: bool,
+    },
+    /// Toggle (or set with `--on` / `--off`) the keep-awake icon of a tab.
+    KeepAwake {
+        target: Option<String>,
+        state: Option<bool>,
     },
     Status {
         json: bool,
@@ -177,6 +183,27 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
                 json: p.has("--json"),
             },
         ),
+        "keep-awake" => {
+            let parsed = split(command, args, &["--on", "--off"]);
+            let parsed = match (
+                parsed.error.is_none(),
+                parsed.has("--on") && parsed.has("--off"),
+            ) {
+                (true, true) => Split {
+                    error: Some("keep-awake: choose --on or --off, not both".into()),
+                    ..parsed
+                },
+                _ => parsed,
+            };
+            finish(command, parsed, 1, |p, mut pos| Invocation::KeepAwake {
+                target: pos.pop(),
+                state: match (p.has("--on"), p.has("--off")) {
+                    (true, _) => Some(true),
+                    (_, true) => Some(false),
+                    _ => None,
+                },
+            })
+        }
         "status" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
             Invocation::Status {
                 json: p.has("--json"),
@@ -340,6 +367,29 @@ mod tests {
             wait,
             json,
         }
+    }
+
+    #[test]
+    fn keep_awake_parses_its_target_and_state() {
+        let keep = |target: Option<&str>, state| Invocation::KeepAwake {
+            target: target.map(str::to_string),
+            state,
+        };
+        assert_eq!(parse(&["keep-awake"]), keep(None, None));
+        assert_eq!(parse(&["keep-awake", "w1:p2"]), keep(Some("w1:p2"), None));
+        assert_eq!(
+            parse(&["keep-awake", "--on", "w"]),
+            keep(Some("w"), Some(true))
+        );
+        assert_eq!(parse(&["keep-awake", "--off"]), keep(None, Some(false)));
+        assert_eq!(
+            usage(&["keep-awake", "--on", "--off"]),
+            "keep-awake: choose --on or --off, not both"
+        );
+        assert_eq!(
+            parse(&["keep-awake", "--help"]),
+            Invocation::Help(Some("keep-awake"))
+        );
     }
 
     #[test]

@@ -14,6 +14,14 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Keep a tab awake:** the new `keep-awake` action (bind it to a key) puts `keep_awake_icon` (🔒)
+  in front of the label of the tab of the focused pane, and none of its agents goes to sleep while
+  the icon is there, by sweep or by `sleep` (`tab-kept-awake`; `sleep --force` still sleeps them).
+  Run it again to let the tab sleep. `herdr-sleep keep-awake [<pane|name>] [--on|--off]` does the
+  same from a terminal.
+
 ## [0.5.0] - 2026-11-23
 
 <!-- stamped -->

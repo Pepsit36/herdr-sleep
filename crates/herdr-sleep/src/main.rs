@@ -32,6 +32,7 @@ fn main() -> ExitCode {
             json,
         } => cli::sleep(target.as_deref(), force, from_session, wait, json),
         Invocation::Wake { target, wait, json } => cli::wake(target.as_deref(), wait, json),
+        Invocation::KeepAwake { target, state } => cli::keep_awake(target.as_deref(), state),
         Invocation::Status { json } => cli::status(json),
         Invocation::Sweep { now, json } => cli::sweep(now, json),
         Invocation::Config { json } => cli::config(json),

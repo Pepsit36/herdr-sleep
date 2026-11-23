@@ -17,6 +17,7 @@ PLUGIN_ID="pepsit36.herdr-sleep"
 PLUGIN_DIR="${PLUGIN_DIR:-/opt/herdr-sleep}"
 HS="$PLUGIN_DIR/bin/herdr-sleep"
 SLEEP_ICON="💤"
+KEEP_ICON="🔒"
 ONLY="${1:-}"
 
 # Scenarios known to fail against a real Herdr: "id" -> one-line reason.
@@ -564,6 +565,24 @@ s16_remote_control() {
   if wait_for 40 is_asleep "$PANE_A"; then ok "sleep --force ignores the guard"; else bad "alpha is '$(agent_kind "$PANE_A")' after sleep --force"; fi
 }
 
+s17_keep_tab_awake() {
+  new_world "$CONFIG_MANUAL" || return
+  local tab out rc label
+  tab="$(pane_tab "$PANE_A")"
+  label="$(tab_label "$tab")"
+  hs keep-awake alpha >/dev/null 2>&1
+  if [ "$(tab_label "$tab")" = "$KEEP_ICON $label" ]; then ok "the tab label has the lock icon ($(tab_label "$tab"))"; else bad "the tab label is '$(tab_label "$tab")'"; fi
+  out="$(hs sleep alpha 2>&1 >/dev/null)"
+  rc=$?
+  if [ "$rc" = 1 ] && [[ "$out" == *tab-kept-awake* && "$out" == *"--force"* ]]; then ok "sleep refuses a pane of a tab kept awake"; else bad "rc=$rc stderr='$out'"; fi
+  hs sweep --now >/dev/null 2>&1
+  if is_awake_idle "$PANE_A"; then ok "sweep --now leaves it awake"; else bad "alpha is '$(agent_kind "$PANE_A")' after sweep --now"; fi
+  hs keep-awake alpha >/dev/null 2>&1
+  if [ "$(tab_label "$tab")" = "$label" ]; then ok "the same action removes the icon"; else bad "the tab label is '$(tab_label "$tab")', expected '$label'"; fi
+  hs sleep alpha >/dev/null 2>&1
+  if wait_for 40 is_asleep "$PANE_A"; then ok "alpha sleeps once the tab is released"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -581,6 +600,7 @@ SCENARIOS=(
   "s14|a refused action sleep explains itself|s14_action_refusal"
   "s15|sleep with a draft saves and restores it|s15_sleep_with_draft"
   "s16|an agent in Remote Control stays awake|s16_remote_control"
+  "s17|a tab kept awake does not sleep|s17_keep_tab_awake"
 )
 
 # ---------------------------------------------------------------------------
