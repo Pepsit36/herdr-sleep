@@ -427,7 +427,7 @@ s9_restart_with_an_awake_agent() {
   if pgrep -u "$(id -u)" -x claude >/dev/null; then bad "a claude process runs after the restart"; else ok "no agent process was started"; fi
   # Herdr forgets the name of an agent that never slept: it comes back as <kind>-<pane>.
   if wait_for 15 is_named "$second" "claude-${second//:/_}"; then ok "beta gets the fallback name claude-${second//:/_}"; else bad "beta's name is '$(agent_name "$second")'"; fi
-  if grep -q "RESTORE-DONE restored=2 skipped=0 missing_cwd=0" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; then ok "the journal sums the restore up"; else bad "no RESTORE-DONE restored=2 line"; fi
+  if wait_for 20 grep -q "RESTORE-DONE restored=2 skipped=0 missing_cwd=0" "$STATE_DIR/herdr-sleep.log"; then ok "the journal sums the restore up"; else bad "no RESTORE-DONE restored=2 line"; fi
   herdr pane send-keys "$second" enter >/dev/null 2>&1
   if wait_for 40 is_awake_idle "$second"; then ok "beta wakes"; else bad "beta did not wake (kind=$(agent_kind "$second"))"; fi
   if [ "$(agent_session "$second")" = "$sid_b" ]; then ok "beta resumes its own session"; else bad "beta's session is '$(agent_session "$second")', expected $sid_b"; fi

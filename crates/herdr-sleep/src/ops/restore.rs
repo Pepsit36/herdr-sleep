@@ -15,15 +15,19 @@
 //!   of another source while it does, so a Placeholder cannot take the pane
 //!   over directly. One Agent at a time is ever running.
 //!
-//! Panes are restored one after the other. A pane that is not ready in time
-//! gets a second chance once the others are done. Nothing here fails loudly:
-//! a pane that does not qualify is skipped and the reason goes to the journal.
+//! Panes are restored one after the other, and a pane that is not ready yet
+//! never holds the others back: it is looked at again after them, round after
+//! round, until it has had twice the settle timeout. Nothing here fails
+//! loudly: a pane that does not qualify is skipped and the reason goes to the
+//! journal.
 //!
-//! Journal events: `RESTORE <pane>`, `RESTORE-RETRY <pane> <reason>`,
+//! Journal events: `RESTORE-START panes=N registered=M saved=K`,
+//! `RESTORE <pane>`, `RESTORE-RETRY <pane> <reason>`,
 //! `RESTORE-SKIP <pane> <reason>`, `RESTORE-CWD <pane> <cwd>`,
 //! `RESTORE-RESUME <pane>`, `RESTORE-DONE restored=N skipped=M missing_cwd=K`,
 //! `WARN`.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -49,6 +53,8 @@ pub const REPORT_FILE: &str = "restore.json";
 
 /// Poll interval while waiting for a pane to be ready for its Placeholder.
 const SETTLE_POLL: Duration = Duration::from_millis(250);
+/// Pause between two rounds over the panes that are not ready yet.
+const ROUND_POLL: Duration = Duration::from_secs(1);
 /// Poll interval while waiting for the Placeholder to report.
 const SLEEPING_POLL: Duration = Duration::from_millis(300);
 /// Longest wait for the Placeholder to report.
@@ -93,6 +99,9 @@ enum PaneState {
     Busy,
     /// At its shell prompt, but Herdr still reports an agent.
     IdentityHeld,
+    /// At its shell prompt with no agent label, but Herdr still holds a Saved
+    /// session for the pane.
+    SessionHeld,
 }
 
 impl PaneState {
@@ -102,6 +111,7 @@ impl PaneState {
             PaneState::AgentAlive => "agent-alive",
             PaneState::Busy => "pane-busy",
             PaneState::IdentityHeld => "identity-not-released",
+            PaneState::SessionHeld => "session-held",
         }
     }
 }
@@ -110,36 +120,57 @@ impl PaneState {
 /// agent label keeps them from being ready.
 fn pane_state(env: &dyn Env, pane: &str, saved: bool) -> PaneState {
     let at_shell = env.process_info(pane).is_ok_and(|info| info.at_shell());
-    let held = env.pane(pane).map_or(true, |p| {
-        p.has_agent() || (!saved && p.agent_session.is_some())
+    let (agent, session) = env.pane(pane).map_or((true, false), |p| {
+        (p.has_agent(), p.agent_session.is_some())
     });
+    let held = agent || (!saved && session);
     match (at_shell, held) {
         (true, false) => PaneState::Ready,
+        (true, true) if !agent => PaneState::SessionHeld,
         (true, true) => PaneState::IdentityHeld,
         (false, true) => PaneState::AgentAlive,
         (false, false) => PaneState::Busy,
     }
 }
 
-/// Why a pane was left alone, and whether a second pass may help.
+/// Whether looking at a pane again may help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// No: the reason is final.
+    Never,
+    /// Yes, once: an attempt failed and another may work.
+    Once,
+    /// Yes, round after round until the pane has had its time: it is not
+    /// ready yet.
+    Poll,
+}
+
+/// Why a pane was left alone, and whether a second look may help.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Skip {
     reason: String,
-    retry: bool,
+    retry: Retry,
 }
 
 impl Skip {
     fn final_(reason: impl Into<String>) -> Self {
         Skip {
             reason: reason.into(),
-            retry: false,
+            retry: Retry::Never,
         }
     }
 
     fn transient(reason: impl Into<String>) -> Self {
         Skip {
             reason: reason.into(),
-            retry: true,
+            retry: Retry::Once,
+        }
+    }
+
+    fn not_ready(state: PaneState) -> Self {
+        Skip {
+            reason: state.reason().into(),
+            retry: Retry::Poll,
         }
     }
 }
@@ -249,6 +280,18 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
     };
     let registry = Registry::load(&state_dir);
     let mut pending = candidates(env, config, &registry, &snapshot, &mut report);
+    journal.log(
+        "RESTORE-START",
+        &format!(
+            "panes={} registered={} saved={}",
+            snapshot.panes.len(),
+            pending.iter().filter(|c| !c.saved).count(),
+            pending.iter().filter(|c| c.saved).count()
+        ),
+    );
+    for (pane, reason) in &report.skipped {
+        journal.log("RESTORE-SKIP", &format!("{pane} {reason}"));
+    }
     for (pane, cwd) in &report.missing_cwd {
         journal.log("RESTORE-CWD", &format!("{pane} {cwd}"));
     }
@@ -257,28 +300,73 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
     }
 
     let timeout = config.restore_settle_timeout();
-    // The second pass gives a pane that was not ready in time another full
-    // wait, once the panes after it have had theirs.
-    for pass in 0..2 {
+    // A pane that is not ready is looked at again after the others, round
+    // after round, until it has had two settle timeouts from the start.
+    let deadline = timeout * 2;
+    let start = env.now();
+    let mut noted: HashSet<String> = HashSet::new();
+    let mut tried_again: HashSet<String> = HashSet::new();
+    while !pending.is_empty() {
+        let expired = env.now().duration_since(start) >= deadline;
         let mut retry = Vec::new();
-        for candidate in pending {
-            let pane = &candidate.pane;
-            match restore_pane(env, config, &journal, &state_dir, &candidate, timeout) {
+        for mut candidate in pending {
+            let mut outcome = restore_pane(
+                env,
+                config,
+                &journal,
+                &state_dir,
+                &candidate,
+                Duration::ZERO,
+                timeout,
+            );
+            // Herdr keeps a Saved session as the identity of a pane for good
+            // when no Agent ever ran there: a Placeholder cannot take it
+            // over, so the Agent is resumed and goes to sleep (ADR 0009).
+            if expired
+                && !candidate.saved
+                && outcome
+                    .as_ref()
+                    .is_err_and(|skip| skip.reason == PaneState::SessionHeld.reason())
+            {
+                candidate.saved = true;
+                outcome = restore_pane(
+                    env,
+                    config,
+                    &journal,
+                    &state_dir,
+                    &candidate,
+                    Duration::ZERO,
+                    timeout,
+                );
+            }
+            let pane = candidate.pane.clone();
+            match outcome {
                 Ok(()) => {
-                    journal.log("RESTORE", pane);
-                    report.restored.push(pane.clone());
-                }
-                Err(skip) if skip.retry && pass == 0 => {
-                    journal.log("RESTORE-RETRY", &format!("{pane} {}", skip.reason));
-                    retry.push(candidate);
+                    journal.log("RESTORE", &pane);
+                    report.restored.push(pane);
                 }
                 Err(skip) => {
-                    journal.log("RESTORE-SKIP", &format!("{pane} {}", skip.reason));
-                    report.skipped.push((pane.clone(), skip.reason));
+                    let again = match skip.retry {
+                        Retry::Poll => !expired,
+                        Retry::Once => tried_again.insert(pane.clone()),
+                        Retry::Never => false,
+                    };
+                    if again {
+                        if noted.insert(pane.clone()) {
+                            journal.log("RESTORE-RETRY", &format!("{pane} {}", skip.reason));
+                        }
+                        retry.push(candidate);
+                    } else {
+                        journal.log("RESTORE-SKIP", &format!("{pane} {}", skip.reason));
+                        report.skipped.push((pane, skip.reason));
+                    }
                 }
             }
         }
         pending = retry;
+        if !pending.is_empty() {
+            env.sleep(ROUND_POLL);
+        }
     }
     journal.log(
         "RESTORE-DONE",
@@ -304,11 +392,20 @@ fn restore_pane(
     journal: &Journal,
     state_dir: &Path,
     candidate: &Candidate,
+    settle: Duration,
     timeout: Duration,
 ) -> Result<(), Skip> {
     let pane = candidate.pane.as_str();
     if candidate.saved {
-        resume_then_sleep(env, config, journal, pane, &candidate.sleeper, timeout)
+        resume_then_sleep(
+            env,
+            config,
+            journal,
+            pane,
+            &candidate.sleeper,
+            settle,
+            timeout,
+        )
     } else {
         put_placeholder(
             env,
@@ -317,13 +414,13 @@ fn restore_pane(
             state_dir,
             pane,
             &candidate.sleeper,
-            timeout,
+            settle,
         )
     }
 }
 
 /// Put the Placeholder of `sleeper` in `pane`, the pane's shell being ready
-/// within `timeout`.
+/// within `settle`.
 fn put_placeholder(
     env: &dyn Env,
     config: &Config,
@@ -331,7 +428,7 @@ fn put_placeholder(
     state_dir: &Path,
     pane: &str,
     sleeper: &Sleeper,
-    timeout: Duration,
+    settle: Duration,
 ) -> Result<(), Skip> {
     let kind = sleeper.kind.as_str();
     let profile = config
@@ -345,12 +442,12 @@ fn put_placeholder(
     // attaches) and Herdr releases the native identity a moment after the
     // process is gone.
     let mut state = PaneState::Busy;
-    let settled = wait_until(env, timeout, SETTLE_POLL, |_| {
+    let settled = wait_until(env, settle, SETTLE_POLL, |_| {
         state = pane_state(env, pane, false);
         state == PaneState::Ready
     });
     if !settled {
-        return Err(Skip::transient(state.reason()));
+        return Err(Skip::not_ready(state));
     }
 
     let shell = env
@@ -414,26 +511,52 @@ fn put_placeholder(
     Ok(())
 }
 
-/// The name Herdr gives the resumed agent when none was kept.
+/// Longest agent name Herdr accepts.
+const NAME_MAX: usize = 32;
+
+/// Whether Herdr accepts `name` for an agent: 1 to 32 characters, a lowercase
+/// letter first, then lowercase letters, digits, `-` and `_`.
+fn valid_agent_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= NAME_MAX
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// The name of the resumed agent: the one that was kept when Herdr accepts
+/// it, else `<kind>-<pane>` cut to what Herdr accepts (pane ids carry capital
+/// letters).
 fn resumed_name(sleeper: &Sleeper, pane: &str) -> String {
-    sleeper
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("{}-{}", sleeper.kind, sanitize_pane(pane)))
+    if let Some(name) = sleeper.name.as_deref().filter(|n| valid_agent_name(n)) {
+        return name.to_string();
+    }
+    let generated: String = format!("{}-{}", sleeper.kind, sanitize_pane(pane))
+        .to_ascii_lowercase()
+        .chars()
+        .take(NAME_MAX)
+        .collect();
+    if valid_agent_name(&generated) {
+        generated
+    } else {
+        "agent".to_string()
+    }
 }
 
 /// Bring the Agent of a Saved session back in `pane` and put it to sleep.
 ///
-/// The pane's shell must be ready within `timeout`, and so must the Agent
-/// once started and, again, its Guards. An Agent that is back but cannot
+/// The pane's shell must be ready within `settle`, the Agent within `timeout`
+/// once started, and so must its Guards. An Agent that is back but cannot
 /// sleep stays awake: the Sweep puts it to sleep when it has been idle long
-/// enough.
+/// enough. An Agent that started but whose start was reported as failed (its
+/// name was refused, say) is slept all the same: it runs, and leaving it
+/// awake would keep its memory for nothing.
 fn resume_then_sleep(
     env: &dyn Env,
     config: &Config,
     journal: &Journal,
     pane: &str,
     sleeper: &Sleeper,
+    settle: Duration,
     timeout: Duration,
 ) -> Result<(), Skip> {
     let kind = sleeper.kind.as_str();
@@ -450,12 +573,12 @@ fn resume_then_sleep(
         )));
     }
     let mut state = PaneState::Busy;
-    let ready = wait_until(env, timeout, SETTLE_POLL, |_| {
+    let ready = wait_until(env, settle, SETTLE_POLL, |_| {
         state = pane_state(env, pane, true);
         state == PaneState::Ready
     });
     if !ready {
-        return Err(Skip::transient(state.reason()));
+        return Err(Skip::not_ready(state));
     }
 
     let name = resumed_name(sleeper, pane);
@@ -463,8 +586,19 @@ fn resume_then_sleep(
     // The profile's command starts with the binary, which `agent start`
     // already knows from the kind.
     let args = resume.get(1..).unwrap_or_default();
-    env.start_agent(&name, kind, pane, args, timeout)
-        .map_err(|error| Skip::transient(format!("cannot resume the agent: {error}")))?;
+    if let Err(error) = env.start_agent(&name, kind, pane, args, timeout) {
+        // An Agent that runs in the pane must not be left behind.
+        if !env
+            .agent(pane)
+            .is_ok_and(|a| a.agent.is_some() && !a.is_sleeping())
+        {
+            return Err(Skip::transient(format!("cannot resume the agent: {error}")));
+        }
+        journal.log(
+            "WARN",
+            &format!("{pane}: the agent runs although its start failed: {error}"),
+        );
+    }
     let agent = env
         .agent(pane)
         .map_err(|error| Skip::final_(format!("cannot read the resumed agent: {error}")))?;
@@ -517,6 +651,7 @@ pub fn sleep_saved_session(env: &dyn Env, config: &Config, pane_id: &str) -> Sle
         pane_id,
         &sleeper,
         config.restore_settle_timeout(),
+        config.restore_settle_timeout(),
     ) {
         Ok(()) => {
             journal.log(
@@ -561,6 +696,9 @@ mod tests {
         /// The pane is known to Herdr by a Saved session only (no registry
         /// entry): its working directory, `None` for a plain registered pane.
         saved_cwd: Option<String>,
+        /// Herdr keeps a Saved session for this registered pane, with no
+        /// agent label, for good.
+        session_only: bool,
     }
 
     impl Spec {
@@ -571,6 +709,7 @@ mod tests {
                 announce_after: Some(Duration::from_millis(600)),
                 run_fails: false,
                 saved_cwd: None,
+                session_only: false,
             }
         }
 
@@ -600,6 +739,10 @@ mod tests {
         saved_kind: String,
         /// `herdr agent start` fails.
         start_fails: bool,
+        /// `herdr agent start` reports a failure after the agent started.
+        start_fails_but_runs: bool,
+        /// Name Herdr reports for the Saved sessions.
+        saved_name: Option<String>,
         /// The Guards refuse the resumed agent.
         guard: Option<Refusal>,
         /// Saved session panes whose agent was started again.
@@ -632,6 +775,8 @@ mod tests {
                 restore_errors: Vec::new(),
                 saved_kind: "claude".into(),
                 start_fails: false,
+                start_fails_but_runs: false,
+                saved_name: Some("worker".into()),
                 guard: None,
                 live: RefCell::new(BTreeMap::new()),
                 quit: RefCell::new(Default::default()),
@@ -652,13 +797,15 @@ mod tests {
             let held = !self.released(spec);
             Pane {
                 pane_id: pane.into(),
-                name: Some("worker".into()),
+                name: self.saved_name.clone(),
                 agent: held.then(|| self.saved_kind.clone()),
-                agent_session: spec.saved_cwd.as_ref().map(|_| AgentSession {
-                    source: "herdr:claude".into(),
-                    agent: Some(self.saved_kind.clone()),
-                    kind: Some("id".into()),
-                    value: format!("sess-{pane}"),
+                agent_session: (spec.saved_cwd.is_some() || spec.session_only).then(|| {
+                    AgentSession {
+                        source: "herdr:claude".into(),
+                        agent: Some(self.saved_kind.clone()),
+                        kind: Some("id".into()),
+                        value: format!("sess-{pane}"),
+                    }
                 }),
                 cwd: spec.saved_cwd.clone(),
                 restore_error: self
@@ -761,11 +908,18 @@ mod tests {
                 }
                 return Ok(self.saved_pane(pane, spec));
             }
+            if self.quit.borrow().contains(pane) {
+                // The Agent ran and quit: Herdr lets go of the Saved session.
+                return Ok(Pane {
+                    pane_id: pane.into(),
+                    ..Pane::default()
+                });
+            }
             let held = !self.released(spec);
             Ok(Pane {
                 pane_id: pane.into(),
                 agent: held.then(|| "claude".to_string()),
-                agent_session: held.then(|| AgentSession {
+                agent_session: (held || spec.session_only).then(|| AgentSession {
                     source: "herdr:claude".into(),
                     agent: None,
                     kind: Some("id".into()),
@@ -841,6 +995,9 @@ mod tests {
                 return Err("agent not ready".into());
             }
             self.live.borrow_mut().insert(pane.into(), name.into());
+            if self.start_fails_but_runs {
+                return Err("invalid_agent_name".into());
+            }
             Ok(())
         }
 
@@ -960,6 +1117,7 @@ mod tests {
         assert_eq!(
             fake.journal(),
             [
+                "RESTORE-START panes=2 registered=2 saved=0",
                 "RESTORE w1-2",
                 "RESTORE w1-3",
                 "RESTORE-DONE restored=2 skipped=0 missing_cwd=0"
@@ -1046,6 +1204,7 @@ mod tests {
         assert_eq!(
             fake.journal(),
             [
+                "RESTORE-START panes=1 registered=1 saved=0",
                 "RESTORE-RETRY w1-2 identity-not-released",
                 "RESTORE-SKIP w1-2 identity-not-released",
                 "RESTORE-DONE restored=0 skipped=1 missing_cwd=0"
@@ -1192,10 +1351,13 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_registry_does_nothing_and_logs_nothing() {
+    fn an_empty_registry_does_nothing_and_says_it_ran() {
         let fake = Fake::new("empty");
         assert_eq!(run(&fake), RestoreReport::default());
-        assert!(fake.journal().is_empty());
+        assert_eq!(
+            fake.journal(),
+            ["RESTORE-START panes=0 registered=0 saved=0"]
+        );
         assert!(fake.calls().is_empty());
     }
 
@@ -1396,7 +1558,7 @@ mod tests {
     fn a_restart_puts_every_pane_back_to_sleep() {
         let mut fake = Fake::new("restart");
         for i in 0..12u64 {
-            let released_at = Some(Duration::from_secs(if i % 3 == 0 { 0 } else { 25 * i }));
+            let released_at = Some(Duration::from_secs(if i % 3 == 0 { 0 } else { 8 * i }));
             let registered = Spec {
                 released_at,
                 ..Spec::ready()
@@ -1406,8 +1568,8 @@ mod tests {
                 ..Spec::saved("/proj")
             };
             fake = fake
-                .pane(&format!("r-{i:02}"), registered)
-                .pane(&format!("s-{i:02}"), saved);
+                .pane(&format!("w{i}A:p1"), registered)
+                .pane(&format!("w{i}B:pC"), saved);
         }
         fake = fake.pane("g-00", Spec::saved("/gone"));
         fake.missing_dirs = vec!["/gone".into()];
@@ -1420,6 +1582,23 @@ mod tests {
         );
         // Every restored pane got exactly one Placeholder.
         assert_eq!(fake.runs().len(), 24);
+        // Every awake agent was started again with its own session, under a
+        // name Herdr accepts.
+        let started = starts(&fake);
+        assert_eq!(started.len(), 12, "{started:?}");
+        for i in 0..12 {
+            let pane = format!("w{i}B:pC");
+            assert!(
+                started
+                    .iter()
+                    .any(|c| c.ends_with(&format!(" {pane} --resume sess-{pane}"))),
+                "{pane}: {started:?}"
+            );
+        }
+        assert!(started.iter().all(|c| {
+            let name = c.split(' ').nth(1).unwrap();
+            valid_agent_name(name)
+        }));
         // Every pane is in the registry for the next restart.
         assert_eq!(Registry::load(&fake.state_dir).panes.len(), 24);
         assert_eq!(
@@ -1504,6 +1683,95 @@ mod tests {
         assert!(
             fake.journal()
                 .contains(&"RESTORE-RESUME w1-2 kind=claude".to_string())
+        );
+    }
+
+    #[test]
+    fn the_generated_name_is_one_herdr_accepts() {
+        let mut fake = Fake::new("name").pane("w2A:p3", Spec::saved("/proj"));
+        fake.saved_name = None;
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w2A:p3"]);
+        assert_eq!(
+            starts(&fake),
+            ["start claude-w2a_p3 claude w2A:p3 --resume sess-w2A:p3"]
+        );
+    }
+
+    #[test]
+    fn a_kept_name_herdr_would_refuse_is_replaced() {
+        let mut fake = Fake::new("bad-name").pane("w1-2", Spec::saved("/proj"));
+        fake.saved_name = Some("Worker One".into());
+        run(&fake);
+        assert_eq!(starts(&fake).len(), 1);
+        assert!(starts(&fake)[0].starts_with("start claude-w1-2 "));
+        assert!(valid_agent_name("worker_1-b"));
+        assert!(!valid_agent_name(""));
+        assert!(!valid_agent_name("1abc"));
+        assert!(!valid_agent_name("Abc"));
+        assert!(!valid_agent_name(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn an_agent_that_started_despite_a_failure_is_put_to_sleep() {
+        let mut fake = Fake::new("started-anyway").pane("w1-2", Spec::saved("/proj"));
+        fake.start_fails_but_runs = true;
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w1-2"]);
+        assert_eq!(starts(&fake).len(), 1);
+        assert!(
+            fake.journal()
+                .iter()
+                .any(|l| l.starts_with("WARN w1-2: the agent runs"))
+        );
+    }
+
+    #[test]
+    fn a_pane_that_is_not_ready_never_holds_the_others_back() {
+        let stuck = Spec {
+            released_at: None,
+            ..Spec::ready()
+        };
+        let fake = Fake::new("no-blocking")
+            .pane("a-stuck", stuck)
+            .pane("b-ready", Spec::ready())
+            .pane("c-saved", Spec::saved("/proj"));
+        let report = restore(&fake, &config_with_timeout(60));
+        assert_eq!(report.restored, ["b-ready", "c-saved"]);
+        assert_eq!(report.skipped.len(), 1);
+        // The ready panes were done within seconds, not after a full wait.
+        let at = fake.exec_at.borrow();
+        assert!(at["b-ready"] < Duration::from_secs(5), "{at:?}");
+        assert!(at["c-saved"] < Duration::from_secs(10), "{at:?}");
+    }
+
+    #[test]
+    fn a_registered_pane_stuck_on_a_saved_session_is_resumed_then_put_to_sleep() {
+        let held = Spec {
+            session_only: true,
+            ..Spec::ready()
+        };
+        let fake = Fake::new("session-held").pane("w1-2", held);
+        let report = restore(&fake, &config_with_timeout(10));
+        assert_eq!(report.restored, ["w1-2"], "{report:?}");
+        assert_eq!(starts(&fake), ["start worker claude w1-2 --resume sess-1"]);
+        assert!(fake.runs().len() == 1);
+        assert!(
+            fake.journal()
+                .contains(&"RESTORE-RETRY w1-2 session-held".to_string())
+        );
+    }
+
+    #[test]
+    fn every_pane_the_restore_could_not_use_is_in_the_journal() {
+        let fake = Fake::new("journal-all").pane("w1-2", Spec::ready());
+        fake.register("w9-9", "claude", "sess-9", None, "/work");
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w1-2"]);
+        let journal = fake.journal();
+        assert!(
+            journal.contains(&"RESTORE-SKIP w9-9 pane-gone".to_string()),
+            "{journal:?}"
         );
     }
 

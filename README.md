@@ -57,9 +57,10 @@ Update with `herdr plugin update`.
    saved session) are started again with `--resume`, one at a time, and put to sleep as soon as they
    are ready. Only panes that still exist, have no agent, sit at a shell prompt and still have their
    working directory are handled. Herdr starts a restored pane's shell when a client attaches, so
-   the plugin waits up to `restore_settle_timeout_seconds` per pane and gives the panes that were not
-   ready a second pass. The others are left alone and logged as `RESTORE-SKIP` in the journal;
-   panes whose directory is gone are listed apart.
+   the plugin looks again, round after round, at the panes that are not ready yet, for up to twice
+   `restore_settle_timeout_seconds`, without holding the others back. The others are left alone and
+   logged as `RESTORE-SKIP` in the journal; the first line of a run is `RESTORE-START`, with the
+   panes it found. Panes whose directory is gone are listed apart.
 
 ## Sidebar marker
 
@@ -154,8 +155,8 @@ ignore_child_regex = ["mcp", "npm exec", "language-server", "tsserver", "caffein
 # Watcher
 sweep_interval_seconds = 60
 
-# After a Herdr restart: seconds to wait, per pane and per pass, for the pane's shell
-# and for Herdr to release the agent's identity (5 to 600).
+# After a Herdr restart: seconds a pane gets (twice that in all) to reach its shell
+# prompt and for Herdr to release the agent's identity (5 to 600).
 restore_settle_timeout_seconds = 60
 
 # Prompt detection. The prompt is looked for between the last two rules of the screen (lines
