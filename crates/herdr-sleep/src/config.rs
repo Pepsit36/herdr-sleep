@@ -689,8 +689,8 @@ impl Config {
         Duration::from_secs(self.sleep_after_minutes.saturating_mul(60))
     }
 
-    /// Longest wait of `restore`, per pane and per pass, for a pane to be
-    /// ready for its Placeholder.
+    /// How long `restore` gives a pane to be ready for its Placeholder, per
+    /// pass: it looks at the pane again for twice that, from its start.
     pub fn restore_settle_timeout(&self) -> Duration {
         Duration::from_secs(self.restore_settle_timeout_seconds)
     }
@@ -808,8 +808,8 @@ impl Config {
 # Seconds between two sweeps of the watcher (5 to 3600).
 #sweep_interval_seconds = {DEFAULT_SWEEP_INTERVAL_SECONDS}
 
-# Seconds `restore` waits, per pane and per pass, for the pane's shell and for Herdr to
-# release the native agent identity after a Herdr restart (5 to 600).
+# Seconds a pane gets (twice that in all) after a Herdr restart to reach its shell prompt and
+# for Herdr to release the native agent identity (5 to 600).
 #restore_settle_timeout_seconds = {DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS}
 
 # Agents whose name matches one of these regexes never sleep (case-insensitive).

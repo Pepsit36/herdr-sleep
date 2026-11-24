@@ -19,4 +19,6 @@ After a Herdr restart, `restore` also handles the panes that Herdr reports with 
 - An Agent that is back but cannot sleep (a Guard refuses) stays awake and the Sweep puts it to sleep once it has been idle long enough.
 - `dry_run` never starts an Agent.
 - Panes whose working directory is gone are not resumed; they are listed apart (`RESTORE-CWD`, `herdr-sleep status`).
-- Herdr starts the pane's shell when a client attaches, so `restore` waits `restore_settle_timeout_seconds` (60 s by default) per pane, and gives the panes that were not ready a second pass.
+- Herdr starts the pane's shell when a client attaches, so a pane that is not ready is looked at again after the others, round after round, for twice `restore_settle_timeout_seconds` (60 s by default) from the start of the run. A slow pane never holds the others back.
+- The Agent gets a name Herdr accepts (lowercase letters, digits, `-` and `_`, 32 characters at most): a kept name that does not qualify is replaced by `<kind>-<pane>` in lowercase. An Agent that started although `herdr agent start` reported a failure is put to sleep all the same.
+- A registered pane for which Herdr still holds a Saved session, with no agent label, when its time is up is resumed then put to sleep, because a Placeholder cannot take the identity over.

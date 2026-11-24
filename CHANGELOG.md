@@ -14,6 +14,25 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-24
+
+<!-- stamped -->
+
+### Fixed
+
+- **Restart:** a pane whose Herdr identifier has capital letters, which is most of them, is resumed
+  again after a restart: the agent used to get a name Herdr refuses (`invalid_agent_name`), stayed
+  awake and was given up. Names are now lowercase and at most 32 characters, and a kept name that
+  Herdr would refuse is replaced. An agent that started although its start was reported as failed
+  now goes to sleep like the others.
+- **Restart:** a pane that is not ready no longer makes the others wait. Ready panes sleep within
+  seconds, and a slow one is looked at again, round after round, for twice
+  `restore_settle_timeout_seconds`. A registered pane that Herdr still holds a saved session for
+  is resumed then put to sleep when its time is up, instead of being given up.
+- **Restart:** every run of `restore` starts with a `RESTORE-START` line in the journal, and the
+  panes it leaves aside before the rounds (`pane-gone`, no saved session) are logged as
+  `RESTORE-SKIP`, so a restart that did nothing is no longer silent.
+
 ## [0.6.0] - 2026-11-23
 
 <!-- stamped -->
