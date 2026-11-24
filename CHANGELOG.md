@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-24
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Restart:** a pane whose Herdr identifier has capital letters, which is most of them, is resumed
