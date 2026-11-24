@@ -102,6 +102,8 @@ steady_idle() {
     sleep 0.5
   done
 }
+no_agent() { [ -z "$(agent_kind "$1")" ]; }
+restore_ran_twice() { [ "$(grep -c RESTORE-START "$STATE_DIR/herdr-sleep.log" 2>/dev/null)" -ge 2 ]; }
 is_named() { [ "$(agent_name "$1")" = "$2" ]; }
 
 screen() { herdr pane read "$1" --source recent --lines 100 2>/dev/null; }
@@ -275,6 +277,39 @@ s2_wake_by_enter() {
   if wait_for 20 is_named "$PANE_A" alpha; then ok "the name alpha is given back"; else bad "the name after the wake is '$(agent_name "$PANE_A")', expected alpha"; fi
   if screen_has "$PANE_A" "fake claude session $SID"; then ok "the screen shows the resumed session"; else bad "the screen does not show 'fake claude session $SID'"; fi
   if [ -z "$(placeholder_pid "$PANE_A")" ]; then ok "the Placeholder is gone"; else bad "the Placeholder still runs"; fi
+}
+
+s18_woken_pane_loses_its_marker() {
+  new_world "$CONFIG_MANUAL" || return
+  local tab
+  tab="$(pane_tab "$PANE_A")"
+  sleep_alpha || return
+  if wait_for 15 tab_prefixed "$tab"; then ok "the tab of the sleeping agent is prefixed"; else bad "the tab label is '$(tab_label "$tab")'"; fi
+  # Wake it the way a user does (Enter in the Placeholder), which leaves the registry through the Replay.
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "the agent is back as claude"; else
+    bad "no wake: kind=$(agent_kind "$PANE_A")"
+    return
+  fi
+  if wait_for 15 tab_not_prefixed "$tab"; then ok "the tab loses its prefix once the agent is back"; else bad "the tab label is still '$(tab_label "$tab")'"; fi
+  # The agent ends: nothing sleeps, nothing is left to restore.
+  herdr pane send-text "$PANE_A" "/exit" >/dev/null 2>&1
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 20 no_agent "$PANE_A"; then ok "the agent ended"; else bad "kind is still '$(agent_kind "$PANE_A")'"; fi
+  hs sweep --now >/dev/null 2>&1
+  if tab_not_prefixed "$tab"; then ok "the tab stays unprefixed after the sweep"; else bad "the tab label is '$(tab_label "$tab")'"; fi
+  if jq -e '.panes | has("'"$PANE_A"'") | not' "$STATE_DIR/sleepers.json" >/dev/null 2>&1; then ok "the registry no longer holds the pane"; else bad "the registry still holds $PANE_A"; fi
+  if stop_server; then ok "the server stopped"; else
+    bad "the server did not stop"
+    return
+  fi
+  if start_server; then ok "the server started again"; else
+    bad "the server did not restart"
+    return
+  fi
+  attach_client
+  if wait_for 60 restore_ran_twice; then ok "restore ran again after the restart"; else bad "no second RESTORE-START after the restart"; fi
+  if [ -z "$(agent_kind "$PANE_A")" ] && tab_not_prefixed "$(pane_tab "$PANE_A")"; then ok "the ended agent stays a plain shell, tab unprefixed"; else bad "kind='$(agent_kind "$PANE_A")' tab='$(tab_label "$(pane_tab "$PANE_A")")'"; fi
 }
 
 s3_wake_by_typing() {
@@ -620,6 +655,7 @@ SCENARIOS=(
   "s15|sleep with a draft saves and restores it|s15_sleep_with_draft"
   "s16|an agent in Remote Control stays awake|s16_remote_control"
   "s17|a tab kept awake does not sleep|s17_keep_tab_awake"
+  "s18|a woken pane loses its marker|s18_woken_pane_loses_its_marker"
   "s19|overlapping sleeps type once|s19_overlapping_sleeps"
 )
 

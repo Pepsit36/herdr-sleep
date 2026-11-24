@@ -316,6 +316,7 @@ pub(super) mod tests {
 
     impl Env for Fake {
         fn snapshot(&self) -> EnvResult<crate::herdr::Snapshot> {
+            self.calls.borrow_mut().push("snapshot".into());
             Ok(crate::herdr::Snapshot::default())
         }
 

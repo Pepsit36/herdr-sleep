@@ -23,7 +23,8 @@
 //!
 //! Journal events: `RESTORE-START panes=N registered=M saved=K`,
 //! `RESTORE <pane>`, `RESTORE-RETRY <pane> <reason>`,
-//! `RESTORE-SKIP <pane> <reason>`, `RESTORE-CWD <pane> <cwd>`,
+//! `RESTORE-SKIP <pane> <reason>` (also for a pane Herdr shows asleep that the
+//! registry does not know), `RESTORE-CWD <pane> <cwd>`,
 //! `RESTORE-RESUME <pane>`, `RESTORE-DONE restored=N skipped=M missing_cwd=K`,
 //! `WARN`.
 
@@ -242,10 +243,18 @@ fn candidates(
         }
     }
     for pane in &snapshot.panes {
-        if registry.panes.contains_key(&pane.pane_id)
-            || pane.is_sleeping()
-            || pane.agent_session.is_none()
-        {
+        if registry.panes.contains_key(&pane.pane_id) {
+            continue;
+        }
+        // Herdr shows a sleeping agent the plugin has no record of: there is
+        // nothing to restore it from, and it must not go unsaid.
+        if pane.is_sleeping() {
+            report
+                .skipped
+                .push((pane.pane_id.clone(), "sleeping-agent-not-registered".into()));
+            continue;
+        }
+        if pane.agent_session.is_none() {
             continue;
         }
         match saved_sleeper(env, config, pane) {
@@ -743,6 +752,8 @@ mod tests {
         start_fails_but_runs: bool,
         /// Name Herdr reports for the Saved sessions.
         saved_name: Option<String>,
+        /// Panes Herdr shows as `sleeping-claude` that the registry lacks.
+        unknown_sleepers: Vec<String>,
         /// The Guards refuse the resumed agent.
         guard: Option<Refusal>,
         /// Saved session panes whose agent was started again.
@@ -777,6 +788,7 @@ mod tests {
                 start_fails: false,
                 start_fails_but_runs: false,
                 saved_name: Some("worker".into()),
+                unknown_sleepers: Vec::new(),
                 guard: None,
                 live: RefCell::new(BTreeMap::new()),
                 quit: RefCell::new(Default::default()),
@@ -886,6 +898,11 @@ mod tests {
                             ..Pane::default()
                         },
                     })
+                    .chain(self.unknown_sleepers.iter().map(|pane| Pane {
+                        pane_id: pane.clone(),
+                        agent: Some("sleeping-claude".into()),
+                        ..Pane::default()
+                    }))
                     .collect(),
                 ..Snapshot::default()
             })
@@ -1759,6 +1776,24 @@ mod tests {
         assert!(
             fake.journal()
                 .contains(&"RESTORE-RETRY w1-2 session-held".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sleeping_pane_the_registry_does_not_know_is_journaled() {
+        // Herdr shows 'sleeping-claude' but nothing records its session: it
+        // cannot be restored, and the journal says so instead of staying silent.
+        let mut fake = Fake::new("unknown-sleeper").pane("w1-2", Spec::ready());
+        fake.unknown_sleepers = vec!["w1-9".into()];
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w1-2"]);
+        assert!(report.skipped.contains(&(
+            "w1-9".to_string(),
+            "sleeping-agent-not-registered".to_string()
+        )));
+        assert!(
+            fake.journal()
+                .contains(&"RESTORE-SKIP w1-9 sleeping-agent-not-registered".to_string())
         );
     }
 

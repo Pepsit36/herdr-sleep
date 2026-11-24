@@ -711,8 +711,9 @@ mod tests {
         let rig = rig("interval");
         let host = rig.host(|n, host| host.shutdown.set(n == 25));
         assert_eq!(rig.run(&host, || Ok(config(10))), ExitReason::Signal);
-        // Passes at the start, after 10 s and after 20 s.
-        assert_eq!(rig.env.snapshots.get(), 3);
+        // Passes at the start, after 10 s and after 20 s, each reading the
+        // session for the sweep and again for the markers.
+        assert_eq!(rig.env.snapshots.get(), 6);
     }
 
     #[test]
@@ -775,7 +776,8 @@ mod tests {
         rig.env.snapshot_failures.set(1);
         let host = rig.host(|n, host| host.shutdown.set(n == 12));
         assert_eq!(rig.run(&host, || Ok(config(5))), ExitReason::Signal);
-        assert_eq!(rig.env.snapshots.get(), 3);
+        // The failed read ends its pass at once; the two others read twice.
+        assert_eq!(rig.env.snapshots.get(), 5);
         assert!(
             rig.journal()
                 .contains("WARN sweep: cannot read the session")

@@ -245,7 +245,8 @@ is replayed into the agent once it is ready.
 - Sleeping panes after a Herdr restart appear once a Herdr client attaches; panes the plugin could
   not restore are listed as `RESTORE-SKIP <pane> <reason>` in the journal (and by `herdr-sleep
   status`), followed by a `RESTORE-DONE restored=N skipped=M missing_cwd=K` line. Panes whose
-  working directory is gone are `RESTORE-CWD`. Run `herdr-sleep restore` again to retry them; raise
+  working directory is gone are `RESTORE-CWD`; a pane Herdr shows asleep that the plugin has no
+  record of is `sleeping-agent-not-registered`. Run `herdr-sleep restore` again to retry them; raise
   `restore_settle_timeout_seconds` when many panes are skipped as `identity-not-released`. The panes
   that were asleep are in `sleepers.json` in the state directory.
 
