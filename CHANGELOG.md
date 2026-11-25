@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-25
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Keep awake:** an agent of a tab kept awake could still go to sleep when Herdr did not answer
