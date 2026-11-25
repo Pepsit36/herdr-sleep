@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-25
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleep:** a command that looked like `exec .../herdr-sleep-ph --pane ...` no longer shows up in
