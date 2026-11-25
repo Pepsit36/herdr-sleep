@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-25
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleep marker:** the tab of a pane you woke keeps its 💤 prefix no longer. The prefix used to
