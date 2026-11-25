@@ -497,7 +497,7 @@ mod tests {
             unreachable!()
         }
         fn agent(&self, _: &str) -> EnvResult<Agent> {
-            unreachable!()
+            Ok(self.snapshot()?.agents.remove(0))
         }
         fn process_info(&self, _: &str) -> EnvResult<ProcessInfo> {
             unreachable!()

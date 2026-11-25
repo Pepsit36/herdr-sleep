@@ -583,6 +583,25 @@ s17_keep_tab_awake() {
   if wait_for 40 is_asleep "$PANE_A"; then ok "alpha sleeps once the tab is released"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
 }
 
+s19_overlapping_sleeps() {
+  new_world "$CONFIG_MANUAL" || return
+  # A Sweep of the Watcher, the "Sleep idle agents now" action and a manual
+  # Sleep can reach the same pane together: only one may type into it.
+  hs sleep alpha --json >/dev/null 2>&1 &
+  hs sleep alpha --json >/dev/null 2>&1 &
+  hs sleep alpha --json >/dev/null 2>&1 &
+  wait
+  if wait_for 30 is_asleep "$PANE_A"; then ok "alpha sleeps"; else bad "alpha is '$(agent_kind "$PANE_A")' after three sleeps"; return; fi
+  wait_for 10 placeholder_pid "$PANE_A"
+  local slept
+  slept="$(grep -c " SLEEP .*($PANE_A)" "$STATE_DIR/herdr-sleep.log" 2>/dev/null)"
+  if [ "$slept" = "1" ]; then ok "the pane was put to sleep once"; else bad "$slept SLEEP lines for $PANE_A, expected 1"; fi
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "the agent is back as claude"; else bad "no wake: kind=$(agent_kind "$PANE_A")"; return; fi
+  sleep 3
+  if screen_has "$PANE_A" "herdr-sleep-ph"; then bad "the Placeholder command was typed into the agent"; else ok "nothing was typed into the agent"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -601,6 +620,7 @@ SCENARIOS=(
   "s15|sleep with a draft saves and restores it|s15_sleep_with_draft"
   "s16|an agent in Remote Control stays awake|s16_remote_control"
   "s17|a tab kept awake does not sleep|s17_keep_tab_awake"
+  "s19|overlapping sleeps type once|s19_overlapping_sleeps"
 )
 
 # ---------------------------------------------------------------------------

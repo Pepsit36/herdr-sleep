@@ -359,8 +359,13 @@ mod tests {
         fn pane(&self, _: &str) -> EnvResult<Pane> {
             unreachable!()
         }
-        fn agent(&self, _: &str) -> EnvResult<Agent> {
-            unreachable!()
+        fn agent(&self, pane: &str) -> EnvResult<Agent> {
+            self.agents
+                .borrow()
+                .iter()
+                .find(|agent| agent.pane_id == pane)
+                .cloned()
+                .ok_or_else(|| "no such agent".into())
         }
         fn process_info(&self, _: &str) -> EnvResult<ProcessInfo> {
             unreachable!()

@@ -7,6 +7,7 @@ mod env;
 pub mod event;
 pub mod keep_awake;
 pub mod markers;
+pub mod pane_lock;
 pub mod registry;
 pub mod replay;
 pub mod restore;
