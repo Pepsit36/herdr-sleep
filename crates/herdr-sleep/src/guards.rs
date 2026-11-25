@@ -61,6 +61,9 @@ pub enum Refusal {
     CmdlineExcluded(String),
     RemoteControl,
     TabKeptAwake,
+    /// The label of the agent's tab cannot be read, so whether the tab is
+    /// kept awake is unknown.
+    TabUnreadable,
     CwdExcluded(String),
     AgentProcessNotFound,
     ProtectedEnv(String),
@@ -91,6 +94,7 @@ impl Refusal {
             Refusal::CmdlineExcluded(_) => "excluded-cmdline-regex",
             Refusal::RemoteControl => "remote-control",
             Refusal::TabKeptAwake => "tab-kept-awake",
+            Refusal::TabUnreadable => "tab-unreadable",
             Refusal::CwdExcluded(_) => "cwd-excluded",
             Refusal::AgentProcessNotFound => "agent-process-not-found",
             Refusal::ProtectedEnv(_) => "protected-env",
@@ -141,6 +145,9 @@ impl fmt::Display for Refusal {
             ),
             Refusal::TabKeptAwake => f.write_str(
                 "tab-kept-awake: the tab is kept awake (toggle it with the keep-awake action)",
+            ),
+            Refusal::TabUnreadable => f.write_str(
+                "tab-unreadable: the label of the tab cannot be read, so it may be kept awake",
             ),
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
@@ -317,10 +324,18 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         return Err(Refusal::Focused);
     }
     check_filters(config, agent)?;
-    if ctx.probe.tab_label(&agent.tab_id).is_some_and(|label| {
-        tab_label::keeps_awake(&label, &config.sleep_icon, &config.keep_awake_icon)
-    }) {
-        return Err(Refusal::TabKeptAwake);
+    // Fails closed like the conversation check: a label that cannot be read
+    // may be the one of a tab kept awake.
+    if !config.keep_awake_icon.is_empty() {
+        match ctx.probe.tab_label(&agent.tab_id) {
+            Some(label)
+                if tab_label::keeps_awake(&label, &config.sleep_icon, &config.keep_awake_icon) =>
+            {
+                return Err(Refusal::TabKeptAwake);
+            }
+            Some(_) => {}
+            None => return Err(Refusal::TabUnreadable),
+        }
     }
 
     let info = ctx.probe.process_info();
@@ -995,11 +1010,16 @@ mod tests {
         env: HashMap<i32, Vec<(String, String)>>,
         screen: Option<String>,
         saved: Option<bool>,
+        /// The label of every tab, `None` when it cannot be read.
+        tab: Option<String>,
     }
 
     impl Probe for FakeProbe {
         fn claude_conversation_saved(&self, _session_id: &str) -> Option<bool> {
             self.saved
+        }
+        fn tab_label(&self, _: &str) -> Option<String> {
+            self.tab.clone()
         }
         fn process_info(&self) -> Option<ProcessInfo> {
             self.info.clone()
@@ -1029,6 +1049,7 @@ mod tests {
             env: HashMap::new(),
             screen: Some(esc(screen)),
             saved: Some(true),
+            tab: Some(String::new()),
         }
     }
 
@@ -1376,6 +1397,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_tab_label_refuses_but_force_and_a_disabled_feature_do_not() {
+        let t = table(&[]);
+        let mut p = probe(&empty_screen());
+        p.tab = None;
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::TabUnreadable));
+        assert_eq!(
+            run(&config(), &agent(), &t, &p, SleepMode::Manual),
+            Err(Refusal::TabUnreadable)
+        );
+        assert_eq!(run(&config(), &agent(), &t, &p, SleepMode::Force), Ok(()));
+        let mut off = config();
+        off.keep_awake_icon = String::new();
+        assert_eq!(run(&off, &agent(), &t, &p, SleepMode::Sweep), Ok(()));
+    }
+
+    #[test]
     fn remote_control_keeps_a_claude_awake() {
         let t = table(&[]);
         let badge = format!("  \\e[2m/rc active\\e[0m\r\n{}", empty_screen());
@@ -1629,6 +1667,7 @@ mod tests {
             env: HashMap::new(),
             screen: None,
             saved: Some(true),
+            tab: None,
         };
         assert_eq!(
             run(&config(), &a, &table(&["make"]), &p, SleepMode::Force),
@@ -1664,6 +1703,7 @@ mod tests {
             ),
             (Refusal::PromptNotDetected, "prompt-not-detected"),
             (Refusal::DraftInPrompt, "draft-in-prompt"),
+            (Refusal::TabUnreadable, "tab-unreadable"),
             (Refusal::Superseded, "superseded"),
         ];
         for (refusal, code) in cases {

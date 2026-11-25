@@ -223,7 +223,7 @@ is replayed into the agent once it is ready.
   your agent draws its prompt differently),
   `no-conversation` (a Claude Code session whose conversation is not saved yet, typically before the
   first message: it could not be resumed, so the agent is left alone and retried later), and so on.
-- **A tab never sleeps.** `tab-kept-awake` means its label starts with the `keep_awake_icon`: run
+- **A tab never sleeps.** `tab-unreadable` means Herdr did not give the tab's label, so the agent is left alone until the next sweep. `tab-kept-awake` means its label starts with the `keep_awake_icon`: run
   the `keep-awake` action again, or rename the tab without the icon.
 - **A Claude Code agent in Remote Control stays awake.** `remote-control` means the agent was
   started with `--remote-control` (or `--rc`), or its screen shows the `/rc active` badge: it is

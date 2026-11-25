@@ -14,6 +14,13 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Keep awake:** an agent of a tab kept awake could still go to sleep when Herdr did not answer
+  the question "what is the label of this tab" at that moment: the guard took the silence for
+  "not kept awake". It now refuses (`tab-unreadable`), journals it and tries again at the next
+  sweep.
+
 ## [0.6.2] - 2026-11-25
 
 <!-- stamped -->
