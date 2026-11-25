@@ -78,6 +78,7 @@ fn is_transient(refusal: &Refusal) -> bool {
             | Refusal::NoSession
             | Refusal::NoConversation
             | Refusal::PromptNotDetected
+            | Refusal::TabUnreadable
     )
 }
 
