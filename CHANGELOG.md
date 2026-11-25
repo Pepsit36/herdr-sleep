@@ -14,6 +14,16 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sleep:** a command that looked like `exec .../herdr-sleep-ph --pane ...` no longer shows up in
+  the chat of an agent after a wake. Two sleeps reaching the same pane together (the Watcher's
+  sweep, the "Sleep idle agents now" action, a manual sleep) typed the Placeholder command twice:
+  the second copy landed in the Placeholder, which kept it as Captured input, and the Replay typed
+  it into the agent at the next wake. A pane now goes to sleep once at a time, and a sleep that
+  finds the pane already asleep, or its agent changed, leaves it alone without a word in the
+  journal.
+
 ## [0.6.1] - 2026-11-24
 
 <!-- stamped -->

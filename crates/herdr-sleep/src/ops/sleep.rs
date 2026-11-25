@@ -27,6 +27,7 @@ use crate::journal::Journal;
 
 use super::Env;
 use super::markers::sync_markers;
+use super::pane_lock::PaneLock;
 use super::registry::{self, Registry, Sleeper};
 
 /// Pause between typing the exit command and pressing Enter, so an
@@ -141,6 +142,26 @@ pub fn sleep_agent(
     let journal = Journal::new(&state_dir);
     let pane = agent.pane_id.as_str();
     let label = agent.name.as_deref().unwrap_or(pane);
+
+    // 0. One Sleep at a time per pane, and only on the pane as it is now: the
+    // caller read `agent` earlier, and another Sleep may have put it to sleep
+    // since. Typing the Placeholder command a second time would hand it to the
+    // Placeholder, which replays it into the Agent at the next Wake.
+    let _lock = match PaneLock::try_acquire(&state_dir, pane) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return SleepOutcome::Skipped(Refusal::Superseded),
+        Err(error) => {
+            journal.log(
+                "WARN",
+                &format!("{label} ({pane}): cannot lock the pane: {error}"),
+            );
+            return SleepOutcome::Aborted(format!("cannot lock the pane: {error}"));
+        }
+    };
+    match env.agent(pane) {
+        Ok(current) if !current.is_sleeping() && current.session_id() == agent.session_id() => {}
+        _ => return SleepOutcome::Skipped(Refusal::Superseded),
+    }
 
     // 1. Guards.
     if let Err(refusal) = env.check_guards(config, agent, mode) {
@@ -319,6 +340,11 @@ pub fn sleep_agent(
         return abort(format!(
             "cannot type {word:?} safely into a shell (control character or backslash)"
         ));
+    }
+    // Last look before typing: a Placeholder already in the pane would keep
+    // the command as Captured input.
+    if env.agent(pane).is_ok_and(|current| current.is_sleeping()) {
+        return abort("the pane already holds a placeholder".into());
     }
     let quoted: Vec<String> = argv.iter().map(|word| shell_quote(word)).collect();
     let mut command: Vec<&str> = vec!["exec"];
@@ -641,6 +667,8 @@ mod tests {
         /// What the screen shows once Ctrl+U was pressed, when it matters.
         cleared_screen: Option<String>,
         cleared: Cell<bool>,
+        /// Another Sleep's Placeholder shows up as soon as the agent quits.
+        early_placeholder: bool,
     }
 
     impl Fake {
@@ -671,6 +699,7 @@ mod tests {
                 exec_at: Cell::new(None),
                 cleared_screen: None,
                 cleared: Cell::new(false),
+                early_placeholder: false,
                 agent: Agent {
                     pane_id: "w1-2".into(),
                     name: Some("worker".into()),
@@ -725,6 +754,9 @@ mod tests {
         }
 
         fn is_sleeping(&self) -> bool {
+            if self.early_placeholder && self.quit_at.get().is_some() {
+                return true;
+            }
             match (self.exec_at.get(), self.sleeping_after) {
                 (Some(at), Some(after)) => self.clock() >= at + after,
                 _ => false,
@@ -894,6 +926,61 @@ mod tests {
         sleep_agent(fake, &config(), &fake.agent, mode, None)
     }
 
+    fn typed(fake: &Fake) -> bool {
+        fake.calls()
+            .iter()
+            .any(|c| c.starts_with("text") || c.starts_with("keys") || c.starts_with("run "))
+    }
+
+    #[test]
+    fn a_pane_another_sleep_holds_is_left_alone() {
+        let fake = Fake::new("locked");
+        let _other = PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().unwrap();
+        let outcome = run(&fake, SleepMode::Sweep);
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
+        assert!(fake.calls().is_empty());
+        assert_eq!(fake.journal(), "");
+    }
+
+    #[test]
+    fn a_pane_that_already_sleeps_is_left_alone() {
+        let mut fake = Fake::new("asleep");
+        fake.sleeping_after = Some(Duration::ZERO);
+        fake.exec_at.set(Some(Duration::ZERO));
+        let outcome = run(&fake, SleepMode::Manual);
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
+        assert!(!typed(&fake));
+    }
+
+    #[test]
+    fn a_pane_whose_agent_changed_is_left_alone() {
+        let fake = Fake::new("changed");
+        let mut stale = fake.agent.clone();
+        stale.agent_session.as_mut().unwrap().value = "an-older-session".into();
+        let outcome = sleep_agent(&fake, &config(), &stale, SleepMode::Sweep, None);
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
+        assert!(!typed(&fake));
+    }
+
+    #[test]
+    fn the_lock_is_released_when_the_sleep_ends() {
+        let fake = Fake::new("released");
+        assert!(matches!(
+            run(&fake, SleepMode::Sweep),
+            SleepOutcome::Asleep { .. }
+        ));
+        assert!(PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().is_some());
+    }
+
+    #[test]
+    fn the_command_is_not_typed_into_a_placeholder_that_appeared_meanwhile() {
+        let mut fake = Fake::new("early");
+        fake.early_placeholder = true;
+        let outcome = run(&fake, SleepMode::Sweep);
+        assert!(matches!(outcome, SleepOutcome::Aborted(_)), "{outcome:?}");
+        assert!(exec_call(&fake).is_none());
+    }
+
     fn exec_call(fake: &Fake) -> Option<String> {
         fake.calls().into_iter().find(|c| c.starts_with("run "))
     }
@@ -966,6 +1053,7 @@ mod tests {
         let calls = fake.calls();
         let position = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap();
         let ordered = [
+            "agent w1-2".to_string(),
             "guards Sweep".to_string(),
             "placeholder".to_string(),
             format!("read w1-2 {lines}"),
@@ -976,7 +1064,6 @@ mod tests {
             "pane w1-2".to_string(),
             "shell-path 100".to_string(),
             expected_run.clone(),
-            "agent w1-2".to_string(),
             "notify".to_string(),
         ];
         let mut last = 0;
@@ -987,6 +1074,8 @@ mod tests {
             last = at;
         }
         assert_eq!(calls[position("run ")], expected_run);
+        // The Sleeping agent is awaited after the run.
+        assert_eq!(calls[position("run ") + 1], "agent w1-2");
         assert_eq!(calls.iter().filter(|c| c.starts_with("keys")).count(), 1);
 
         let journal = fake.journal();
@@ -1088,7 +1177,7 @@ mod tests {
         cfg.dry_run = true;
         let outcome = sleep_agent(&fake, &cfg, &fake.agent, SleepMode::Sweep, None);
         assert_eq!(outcome, SleepOutcome::DryRun);
-        assert_eq!(fake.calls(), ["guards Sweep"]);
+        assert_eq!(fake.calls(), ["agent w1-2", "guards Sweep"]);
         assert!(
             fake.journal()
                 .contains(" DRY-RUN worker (w1-2) would sleep")
@@ -1386,7 +1475,7 @@ mod tests {
         for mode in [SleepMode::Sweep, SleepMode::Manual, SleepMode::Force] {
             let fake = Fake::new("mode");
             run(&fake, mode);
-            assert_eq!(fake.calls()[0], format!("guards {mode:?}"));
+            assert_eq!(fake.calls()[1], format!("guards {mode:?}"));
         }
     }
 

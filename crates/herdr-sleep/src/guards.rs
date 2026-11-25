@@ -64,9 +64,15 @@ pub enum Refusal {
     CwdExcluded(String),
     AgentProcessNotFound,
     ProtectedEnv(String),
-    BusyChildren { count: usize, first: Vec<String> },
+    BusyChildren {
+        count: usize,
+        first: Vec<String>,
+    },
     PromptNotDetected,
     DraftInPrompt,
+    /// Another Sleep holds the pane, or the pane is no longer the one the
+    /// caller read: it already sleeps, or its Agent changed.
+    Superseded,
 }
 
 impl Refusal {
@@ -91,13 +97,14 @@ impl Refusal {
             Refusal::BusyChildren { .. } => "busy-children",
             Refusal::PromptNotDetected => "prompt-not-detected",
             Refusal::DraftInPrompt => "draft-in-prompt",
+            Refusal::Superseded => "superseded",
         }
     }
 
     /// Whether the refusal is too ordinary to log or notify (the pane simply
-    /// does not hold a managed agent).
+    /// does not hold a managed agent, or another Sleep already has it).
     pub fn is_silent(&self) -> bool {
-        matches!(self, Refusal::NotManaged)
+        matches!(self, Refusal::NotManaged | Refusal::Superseded)
     }
 }
 
@@ -153,6 +160,7 @@ impl fmt::Display for Refusal {
                 "prompt not detected on screen (see prompt_area_lines and prompt_frame_regex)",
             ),
             Refusal::DraftInPrompt => f.write_str("text is typed in the prompt"),
+            Refusal::Superseded => f.write_str("another sleep holds the pane, or it changed"),
         }
     }
 }
@@ -1656,10 +1664,14 @@ mod tests {
             ),
             (Refusal::PromptNotDetected, "prompt-not-detected"),
             (Refusal::DraftInPrompt, "draft-in-prompt"),
+            (Refusal::Superseded, "superseded"),
         ];
         for (refusal, code) in cases {
             assert_eq!(refusal.code(), code);
-            assert_eq!(refusal.is_silent(), code == "not-managed");
+            assert_eq!(
+                refusal.is_silent(),
+                matches!(code, "not-managed" | "superseded")
+            );
             assert!(!refusal.to_string().is_empty());
         }
         assert_eq!(
