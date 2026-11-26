@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-26
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Install:** the plugin installs the prebuilt binaries only when the checkout is the code of the
