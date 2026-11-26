@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-26
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Restart:** an agent keeps its name across a restart even when Herdr stopped reporting the name
