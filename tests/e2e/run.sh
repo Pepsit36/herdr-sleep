@@ -580,9 +580,9 @@ s15_sleep_with_draft() {
   if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes"; else bad "alpha is '$(agent_kind "$PANE_A")' after the wake"; return; fi
   has_draft() { screen "$PANE_A" | grep -q "my draft"; }
   wait_for 20 has_draft
-  in_registry() { grep -q '"w1:p1"' "$STATE_DIR/sleepers.json" 2>/dev/null; }
+  in_registry() { grep -q "\"$PANE_A\"" "$STATE_DIR/sleepers.json" 2>/dev/null; }
   not_in_registry() { ! in_registry; }
-  if wait_for 20 not_in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "w1:p1 is still in sleepers.json"; fi
+  if wait_for 20 not_in_registry; then ok "the woken pane leaves the registry of sleeping panes"; else bad "$PANE_A is still in sleepers.json"; fi
   local text
   text="$(screen "$PANE_A")"
   if [[ "$text" == *"my draft"* && "$text" != *"got: my draft"* ]]; then ok "the draft is back in the prompt, not submitted"; else bad "screen: $(tail -8 <<<"$text" | tr '\n' '|')"; fi
@@ -706,6 +706,30 @@ s23_a_second_restore_leaves_sleeping_panes_alone() {
   if screen_has "$PANE_A" "herdr-sleep-ph"; then bad "a Placeholder command reached the agent"; else ok "nothing was typed into the agent"; fi
 }
 
+s24_an_update_replaces_the_watcher() {
+  new_world "$CONFIG_MANUAL" || return
+  starts() { grep -c "WATCH-START" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; }
+  watching() { [ "$(starts)" -ge 1 ]; }
+  if wait_for 30 watching; then ok "a Watcher runs"; else bad "no WATCH-START in the journal"; return; fi
+  # An update installs the new binary by renaming it over the old one.
+  if ! { cp "$PLUGIN_DIR/bin/herdr-sleep" "$PLUGIN_DIR/bin/herdr-sleep.new" && mv -f "$PLUGIN_DIR/bin/herdr-sleep.new" "$PLUGIN_DIR/bin/herdr-sleep"; }; then
+    bad "cannot install a new binary over the old one"
+    return
+  fi
+  left() { grep -q "WATCH-EXIT updated" "$STATE_DIR/herdr-sleep.log" 2>/dev/null; }
+  if wait_for 30 left; then ok "the old Watcher left after the update"; else bad "the Watcher never noticed the update: $(tail -n 3 "$STATE_DIR/herdr-sleep.log" | tr '\n' '|')"; return; fi
+  # Herdr gives its hooks the socket; a command typed in a shell would have to know it.
+  local socket
+  socket="$(ls "$HOME"/.config/herdr/*.sock 2>/dev/null | head -n 1)"
+  HERDR_SOCKET_PATH="$socket" hs ensure-watcher >/dev/null 2>&1
+  two() { [ "$(starts)" -ge 2 ]; }
+  if wait_for 30 two; then ok "the new Watcher started"; else bad "no second WATCH-START"; fi
+  # The Placeholder command carries a path that exists, so the wake works.
+  sleep_alpha || return
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes after the update"; else bad "no wake: kind=$(agent_kind "$PANE_A")"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -730,6 +754,7 @@ SCENARIOS=(
   "s21|unsubmitted text stays in the prompt|s21_unsubmitted_text_stays_in_the_prompt"
   "s22|an agent in a nested shell stays awake|s22_an_agent_in_a_nested_shell_stays_awake"
   "s23|a second restore leaves sleeping panes alone|s23_a_second_restore_leaves_sleeping_panes_alone"
+  "s24|an update replaces the Watcher|s24_an_update_replaces_the_watcher"
 )
 
 # ---------------------------------------------------------------------------
@@ -770,12 +795,18 @@ run_scenario() {
   echo
 }
 
+RAN=0
 for entry in "${SCENARIOS[@]}"; do
   IFS='|' read -r id title fn <<<"$entry"
   if [ -z "$ONLY" ] || [ "$ONLY" = "$id" ]; then
     run_scenario "$id" "$title" "$fn"
+    RAN=$((RAN + 1))
   fi
 done
+if [ "$RAN" -eq 0 ]; then
+  echo "no scenario named '$ONLY'" >&2
+  exit 1
+fi
 
 echo "== Summary"
 echo "passed: ${#PASSED[@]} (${PASSED[*]:-none})"

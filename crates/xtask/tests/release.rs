@@ -805,6 +805,57 @@ fn publish_replaces_an_asset_attached_with_another_size() {
 }
 
 #[test]
+fn a_resumed_publish_replaces_every_asset_and_keeps_no_stale_checksum() {
+    if !have_curl() {
+        return;
+    }
+    let (repo, stub) = (Repo::new(), Stub::start());
+    let dist = dist(&repo);
+    let sizes: Vec<(String, u64)> = std::fs::read_dir(&dist)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                e.metadata().unwrap().len(),
+            )
+        })
+        .filter(|(name, _)| name.starts_with("herdr-sleep-0.1.0-"))
+        .collect();
+    stub.with(|s| {
+        s.release_body = Some("{}".into());
+        s.next_id = 100;
+        for (n, (name, size)) in sizes.iter().enumerate() {
+            s.assets.push((10 + n as u64, name.clone(), *size as usize));
+        }
+    });
+    let mut env = stub.env();
+    env.push(("RESUME_RELEASE", "1".to_string()));
+    let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let args = [
+        "release",
+        "publish-github",
+        "--dist",
+        dist.to_str().unwrap(),
+        "--poll-seconds",
+        "0",
+        "--version",
+        "0.1.0",
+    ];
+    let run = repo.xtask_env(&args, &pairs);
+    assert_eq!(run.code, 0, "{}{}", run.out, run.err);
+    stub.with(|s| {
+        assert_eq!(s.assets.len(), sizes.len());
+        let deletes = s
+            .requests
+            .iter()
+            .filter(|r| r.starts_with("DELETE"))
+            .count();
+        assert_eq!(deletes, sizes.len(), "{:?}", s.requests);
+    });
+}
+
+#[test]
 fn publish_names_the_missing_token_and_calls_nothing() {
     if !have_curl() {
         return;

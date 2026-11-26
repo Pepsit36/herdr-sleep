@@ -56,6 +56,10 @@ pub fn run(args: &[String]) -> Outcome {
     let level = bump_level(&git::commits(Some(&format!("{merge_base}..HEAD"))));
     let stamped = plan.owned;
 
+    if level.is_some() && on_release_repair_branch() {
+        return Ok(release_repair_publishes());
+    }
+
     let diff = section_diff(&merge_base, &changelog, &tags).map_err(error)?;
     let frozen: Vec<Version> = diff
         .changed
@@ -98,6 +102,31 @@ pub fn run(args: &[String]) -> Outcome {
         }
         _ => Ok(stamp_missing(version, stamped, &changelog, &plan, &tags)),
     }
+}
+
+/// Whether the branch is one of the `fix/release-*` branches, which repair the
+/// release pipeline while a stamped version waits for its tag.
+fn on_release_repair_branch() -> bool {
+    std::env::var("CI_COMMIT_BRANCH")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(git::current_branch)
+        .is_some_and(|branch| branch.starts_with("fix/release-"))
+}
+
+/// A repair branch is exempt from the backlog check, so it can merge while
+/// the last version is untagged; a publishable commit on it would then ask
+/// the release job for a version on top of that one, which it refuses.
+fn release_repair_publishes() -> u8 {
+    eprintln!("ERROR: a fix/release-* branch must not publish a version.");
+    eprintln!();
+    eprintln!(
+        "It repairs the release pipeline while a stamped version has no tag, and the release job"
+    );
+    eprintln!("refuses to publish a new one on top of it. Use commit types that publish nothing");
+    eprintln!("(`ci:`, `build:`, `chore:`, `refactor:`, `docs:`, `test:`) for the repair, and");
+    eprintln!("remove the stamped section this branch added, if any.");
+    1
 }
 
 fn section_diff(merge_base: &str, changelog: &Changelog, tags: &Tags) -> Result<Diff, String> {

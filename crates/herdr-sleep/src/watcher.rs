@@ -212,6 +212,9 @@ pub trait Host {
     fn pause(&self, duration: Duration);
     /// Whether the Watcher was asked to stop.
     fn shutdown_requested(&self) -> bool;
+    /// Whether the plugin was updated under this Watcher: the file it was
+    /// started from is another one now.
+    fn executable_replaced(&self) -> bool;
 }
 
 /// Why the loop ended.
@@ -221,6 +224,8 @@ pub enum ExitReason {
     SocketGone,
     HerdrUnreachable,
     LockRemoved,
+    /// The binary was replaced by an update: the next hook starts the new one.
+    Updated,
 }
 
 impl ExitReason {
@@ -231,6 +236,7 @@ impl ExitReason {
             ExitReason::SocketGone => "socket-gone",
             ExitReason::HerdrUnreachable => "herdr-unreachable",
             ExitReason::LockRemoved => "lock-removed",
+            ExitReason::Updated => "updated",
         }
     }
 }
@@ -270,6 +276,8 @@ pub fn run_loop(
             Some(ExitReason::LockRemoved)
         } else if !host.socket_exists() {
             Some(ExitReason::SocketGone)
+        } else if host.executable_replaced() {
+            Some(ExitReason::Updated)
         } else {
             None
         }
@@ -371,11 +379,27 @@ pub fn install_signal_handlers() {
 pub struct LiveHost {
     socket: PathBuf,
     client: HerdrClient,
+    /// The installed binary and the file it was when the Watcher started.
+    binary: PathBuf,
+    identity: Option<(u64, u64)>,
+}
+
+/// Device and inode of `path`: an update installs the new binary by renaming
+/// it over the old one, which is another file under the same name.
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
 impl LiveHost {
-    pub fn new(socket: PathBuf, client: HerdrClient) -> Self {
-        LiveHost { socket, client }
+    pub fn new(socket: PathBuf, client: HerdrClient, binary: PathBuf) -> Self {
+        let identity = file_identity(&binary);
+        LiveHost {
+            socket,
+            client,
+            binary,
+            identity,
+        }
     }
 }
 
@@ -394,6 +418,12 @@ impl Host for LiveHost {
 
     fn shutdown_requested(&self) -> bool {
         SHUTDOWN.load(Ordering::SeqCst)
+    }
+
+    fn executable_replaced(&self) -> bool {
+        // A binary that cannot be read is not a reason to leave.
+        self.identity
+            .is_some_and(|started| file_identity(&self.binary).is_some_and(|now| now != started))
     }
 }
 
@@ -438,7 +468,7 @@ pub fn watch() -> WatchEnd {
     if let Ok(config) = Config::load() {
         resync_markers(&env, &config);
     }
-    let host = LiveHost::new(socket, client);
+    let host = LiveHost::new(socket, client, env.main_bin());
     let reason = run_loop(&host, &env, &lock_path(&state_dir), &|| {
         Config::load().map_err(|e| e.to_string())
     });
@@ -589,6 +619,7 @@ mod tests {
         socket: Cell<bool>,
         status_ok: Cell<bool>,
         shutdown: Cell<bool>,
+        replaced: Cell<bool>,
         script: RefCell<Script>,
     }
 
@@ -611,6 +642,9 @@ mod tests {
         }
         fn shutdown_requested(&self) -> bool {
             self.shutdown.get()
+        }
+        fn executable_replaced(&self) -> bool {
+            self.replaced.get()
         }
     }
 
@@ -641,6 +675,7 @@ mod tests {
                 socket: Cell::new(true),
                 status_ok: Cell::new(true),
                 shutdown: Cell::new(false),
+                replaced: Cell::new(false),
                 script: RefCell::new(Box::new(script)),
             }
         }
@@ -749,6 +784,32 @@ mod tests {
         });
         assert_eq!(rig.run(&host, || Ok(config(60))), ExitReason::LockRemoved);
         assert_eq!(host.pauses.get(), 2);
+    }
+
+    #[test]
+    fn the_loop_exits_when_the_plugin_is_updated_under_it() {
+        let rig = rig("updated");
+        let host = rig.host(|n, host| host.replaced.set(n == 3));
+        assert_eq!(rig.run(&host, || Ok(config(60))), ExitReason::Updated);
+        assert_eq!(host.pauses.get(), 3);
+        assert_eq!(ExitReason::Updated.as_str(), "updated");
+    }
+
+    #[test]
+    fn a_replaced_binary_is_seen_through_its_inode() {
+        let dir = temp_dir("identity");
+        let binary = dir.join("herdr-sleep");
+        fs::write(&binary, "old").unwrap();
+        let host = LiveHost::new(dir.join("sock"), HerdrClient::from_env(), binary.clone());
+        assert!(!host.executable_replaced());
+        // An update installs the new file under a temporary name, then renames it.
+        let new = dir.join("herdr-sleep.new");
+        fs::write(&new, "new").unwrap();
+        fs::rename(&new, &binary).unwrap();
+        assert!(host.executable_replaced());
+        // A binary that vanished is not a reason to leave.
+        fs::remove_file(&binary).unwrap();
+        assert!(!host.executable_replaced());
     }
 
     #[test]

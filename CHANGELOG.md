@@ -14,6 +14,28 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-26
+
+<!-- stamped -->
+
+### Fixed
+
+- **Install:** the plugin installs the prebuilt binaries only when the checkout is the code of the
+  release the manifest names, and builds from source otherwise. A checkout some commits ahead of its
+  last release used to get the binaries of that release under a newer manifest. Downloads give up
+  after a timeout and are retried, and a binary that does not run on the machine falls back to a
+  source build instead of being installed.
+- **Update:** a Watcher that was running when the plugin was updated leaves by itself within a few
+  seconds, and the next hook starts the new one. The path typed into every Placeholder no longer
+  ends with ` (deleted)` after an update, which made the replay at wake fail.
+- **Release:** a resumed release replaces every asset it attaches, and a checksum always follows
+  its archive, so nobody downloads an archive that does not match its `.sha256`.
+- **Release:** a clone without tags of a repository that already published no longer restarts at
+  `0.1.0`, and a `fix/release-*` branch with a publishable commit is refused by `changelog:check`
+  with the reason instead of failing the release later.
+- **CI:** the test job installs `curl` and `make`, so the publish and dist tests run instead of
+  returning early. `make help` lists `e2e`, and the end-to-end suite fails on an unknown scenario.
+
 ## [0.7.3] - 2026-11-26
 
 <!-- stamped -->

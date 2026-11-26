@@ -78,19 +78,28 @@ fn version_tags(args: &[&str]) -> BTreeSet<Version> {
 pub struct Tags {
     all: BTreeSet<Version>,
     reachable: BTreeSet<Version>,
+    /// The manifest says nothing was ever released (version `0.0.0`, or no
+    /// manifest to say otherwise).
+    unreleased: bool,
 }
 
 impl Tags {
     pub fn load() -> Tags {
+        let unreleased = top_level()
+            .and_then(|root| std::fs::read_to_string(root.join("herdr-plugin.toml")).ok())
+            .is_none_or(|text| manifest_is_unreleased(&text));
         Tags {
             all: version_tags(&["tag", "--list", "v[0-9]*"]),
             reachable: version_tags(&["tag", "--merged", "HEAD", "--list", "v[0-9]*"]),
+            unreleased,
         }
     }
 
-    /// No `vX.Y.Z` tag anywhere: the repository has not published yet.
+    /// No `vX.Y.Z` tag anywhere and a manifest that never released: the
+    /// repository has not published yet. A clone made without its tags of a
+    /// repository that did publish is not one, and must not restart at 0.1.0.
     pub fn bootstrap(&self) -> bool {
-        self.all.is_empty()
+        self.all.is_empty() && self.unreleased
     }
 
     pub fn exists(&self, version: Version) -> bool {
@@ -105,6 +114,15 @@ impl Tags {
     pub fn reachable(&self) -> impl Iterator<Item = Version> + '_ {
         self.reachable.iter().copied()
     }
+}
+
+/// Whether the manifest text carries the placeholder version of a repository
+/// that has not published yet.
+fn manifest_is_unreleased(text: &str) -> bool {
+    text.lines()
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+        .is_none_or(|version| version == "0.0.0")
 }
 
 pub fn rev_parse(reference: &str) -> Option<String> {
@@ -138,4 +156,40 @@ pub fn current_branch() -> Option<String> {
     let out = run(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let name = out.trim();
     (!name.is_empty() && name != "HEAD").then(|| name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_placeholder_version_means_nothing_was_released() {
+        assert!(manifest_is_unreleased(
+            "name = \"x\"\nversion = \"0.0.0\"\n"
+        ));
+        assert!(manifest_is_unreleased("name = \"x\"\n"));
+        assert!(!manifest_is_unreleased(
+            "name = \"x\"\nversion = \"0.7.3\"\n"
+        ));
+        // A version further down belongs to another table.
+        assert!(manifest_is_unreleased(
+            "a = 1\n[[build]]\nversion = \"9.9.9\"\n"
+        ));
+    }
+
+    #[test]
+    fn a_tagless_clone_of_a_released_repository_is_not_a_bootstrap() {
+        let tags = Tags {
+            unreleased: false,
+            ..Tags::default()
+        };
+        assert!(!tags.bootstrap());
+        assert!(
+            Tags {
+                unreleased: true,
+                ..Tags::default()
+            }
+            .bootstrap()
+        );
+    }
 }

@@ -696,6 +696,27 @@ fn check_lets_a_quiet_branch_repair_an_abandoned_stamp() {
 }
 
 #[test]
+fn check_refuses_a_release_repair_branch_that_publishes() {
+    let repo = Repo::new().with_first_release();
+    repo.branch("fix/release-token");
+    repo.commit("fix: change the code too");
+    let run = repo.xtask(&["changelog", "check", "--base", "origin/main"]);
+    assert_eq!(run.code, 1, "{}", run.out);
+    assert!(
+        run.err
+            .contains("a fix/release-* branch must not publish a version"),
+        "{}",
+        run.err
+    );
+
+    let repo = Repo::new().with_first_release();
+    repo.branch("fix/release-token");
+    repo.commit("ci: repair the job");
+    let run = repo.xtask(&["changelog", "check", "--base", "origin/main"]);
+    assert_eq!(run.code, 0, "{}", run.err);
+}
+
+#[test]
 fn check_requires_the_repair_to_match_what_will_publish() {
     let repo = Repo::new().with_first_release();
     repo.commit("feat: merged, release failed");
