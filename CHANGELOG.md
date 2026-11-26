@@ -14,6 +14,35 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-26
+
+<!-- stamped -->
+
+### Changed
+
+- **Action:** "Sleep idle agents now" runs `herdr-sleep sweep --now`, as its title says: every
+  settled, unfocused agent sleeps now, without waiting for the idle time and without the limit of
+  three per pass. The guards still apply.
+- **Configuration:** an empty pattern, a `sleep_icon` equal to `keep_awake_icon`, a `sleep_icon`
+  with a control character or a backslash, and an agent `bin` with arguments are refused with a
+  message naming the key; they used to be accepted and to match everything, hide the sleep state
+  or break every sleep. `sleep_statuses = []` is accepted with a warning.
+
+### Fixed
+
+- **Sleep:** a draft whose first line is empty is seen as a draft and keeps the agent awake. What
+  you type while the agent quits is cleared before the Placeholder command is typed, and a word
+  that starts with `=` is quoted for zsh.
+- **Herdr calls:** a command that exited cleanly is a success even when it prints a warning or a
+  plain `ok`, and one that leaves a background process holding its pipes no longer blocks the
+  plugin for as long as that process lives.
+- **State:** the state files are written through a temporary file of their own and the registry is
+  updated under a lock, so two plugin processes no longer overwrite each other's update. Draft,
+  preview and wake files of panes that were closed are removed after an hour.
+- **Commands:** `sleep <pane> --wait 45` says to write `--wait=45` instead of looking for a pane
+  named 45, `wake` writes its failures on stderr like `sleep`, and `--help` and `--version` do not
+  panic when stdout is closed.
+
 ## [0.7.4] - 2026-11-26
 
 <!-- stamped -->

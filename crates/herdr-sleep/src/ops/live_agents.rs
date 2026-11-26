@@ -59,10 +59,8 @@ impl LiveAgents {
     /// Write the record atomically.
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(state_dir)?;
-        let tmp = state_dir.join(format!("{FILE_NAME}.tmp"));
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, Self::path(state_dir))
+        super::atomic::write(&Self::path(state_dir), &text)
     }
 
     /// Bring the record in line with `snapshot`. `alive` holds the panes this

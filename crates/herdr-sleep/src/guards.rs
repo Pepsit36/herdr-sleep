@@ -552,16 +552,34 @@ pub fn prompt_state(screen_ansi: &str, profile: &Profile) -> PromptState {
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .collect();
-    let in_zone = |zone: &[&str]| {
-        zone.iter()
-            .rev()
-            .find_map(|line| line_state(line, &profile.prompt_regex))
-    };
-    let area = match framed_zone(&lines, profile) {
+    let framed = framed_zone(&lines, profile);
+    let area = match framed {
         Some(zone) => zone,
         None => &lines[lines.len().saturating_sub(profile.prompt_area_lines)..],
     };
-    in_zone(area).unwrap_or(PromptState::NotFound)
+    let Some((row, state)) = area
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(row, line)| Some((row, line_state(line, &profile.prompt_regex)?)))
+    else {
+        return PromptState::NotFound;
+    };
+    // Inside the frame, whatever is drawn under the prompt row belongs to the
+    // draft: one that starts with a line break leaves the first row empty.
+    if state == PromptState::Empty && framed.is_some() && has_text(&area[row + 1..]) {
+        return PromptState::Draft;
+    }
+    state
+}
+
+/// Whether any of `lines` shows something besides blanks and box drawing.
+fn has_text(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        parse_cells(line)
+            .iter()
+            .any(|c| !c.dim && !is_blank(c.ch) && !is_box(c.ch))
+    })
 }
 
 /// The lines between the last two rules of the screen. A rule that a narrow
@@ -1713,6 +1731,23 @@ mod tests {
     fn framed_screen(prompt_line: &str) -> String {
         let rule = "\u{2500}".repeat(12);
         format!("  done\r\n\r\n{rule}\r\n{prompt_line}\r\n{rule}\r\n  auto mode on")
+    }
+
+    #[test]
+    fn a_draft_that_starts_with_a_line_break_is_a_draft() {
+        let rule = "\u{2500}".repeat(12);
+        let screen = format!(
+            "  done\r\n{rule}\r\n\u{276F}\u{a0}\r\n  second row\r\n{rule}\r\n  auto mode on"
+        );
+        let p = probe(&screen);
+        let r = run(&config(), &agent(), &table(&[]), &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::DraftInPrompt));
+        // An empty prompt with blank rows under it stays empty.
+        let screen =
+            format!("  done\r\n{rule}\r\n\u{276F}\u{a0}\r\n   \r\n{rule}\r\n  auto mode on");
+        let p = probe(&screen);
+        let r = run(&config(), &agent(), &table(&[]), &p, SleepMode::Sweep);
+        assert_eq!(r, Ok(()));
     }
 
     #[test]

@@ -237,9 +237,7 @@ fn woken_recently(stamp: &Path, now: u64) -> bool {
 
 /// Write `text` to `path` through a temporary file and a rename.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("ts.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    super::atomic::write(path, text)
 }
 
 #[cfg(test)]

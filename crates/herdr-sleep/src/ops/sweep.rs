@@ -23,7 +23,7 @@ use crate::journal::Journal;
 use super::live_agents::{self, LiveAgents};
 use super::pane_lock::PaneLock;
 use super::registry::{self, Registry};
-use super::wake::wake_stamp_path;
+use super::wake::{sanitize_pane, wake_stamp_path};
 use super::{Env, SleepOutcome, sleep_agent, sync_markers};
 
 /// Most agents put to sleep in one pass. A sleep takes seconds, so the rest
@@ -98,11 +98,8 @@ impl SweepState {
     /// Write the state to `state_dir` atomically (temporary file, then rename).
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(state_dir)?;
-        let target = Self::path(state_dir);
-        let tmp = state_dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string(self).map_err(std::io::Error::other)?;
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, &target)
+        super::atomic::write(&Self::path(state_dir), &text)
     }
 }
 
@@ -170,6 +167,7 @@ fn prune_registry(env: &dyn Env, snapshot: &Snapshot) {
             );
         }
     }
+    prune_pane_files(&dir, snapshot, env.now_millis());
     for (pane, reason) in stale_entries(env, &dir, snapshot) {
         match Registry::remove(&dir, &pane) {
             Ok(()) => journal.log("PRUNE", &format!("{pane} {reason}")),
@@ -177,6 +175,48 @@ fn prune_registry(env: &dyn Env, snapshot: &Snapshot) {
                 "WARN",
                 &format!("cannot prune {}: {error}", registry::FILE_NAME),
             ),
+        }
+    }
+}
+
+/// How old the files of a pane that no longer exists must be before they go.
+const PANE_FILE_GRACE_MS: u64 = 60 * 60_000;
+
+/// Remove the files kept for panes that no longer exist (a saved draft, a
+/// preview, a replay text, a wake stamp, the lock files). A draft left behind
+/// would be typed into whatever agent a recycled pane id holds some day.
+fn prune_pane_files(dir: &Path, snapshot: &Snapshot, now_ms: u64) {
+    let alive: HashSet<String> = snapshot
+        .panes
+        .iter()
+        .map(|pane| sanitize_pane(&pane.pane_id))
+        .collect();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let owner = ["draft", "preview", "replay", "wake", "sleep"]
+            .into_iter()
+            .find_map(|family| {
+                let rest = name.strip_prefix(family)?.strip_prefix('-')?;
+                let (id, extension) = rest.rsplit_once('.')?;
+                matches!(extension, "txt" | "ts" | "lock").then_some(id)
+            });
+        let Some(owner) = owner else {
+            continue;
+        };
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|age| {
+                now_ms.saturating_sub(u64::try_from(age.as_millis()).unwrap_or(u64::MAX))
+                    >= PANE_FILE_GRACE_MS
+            });
+        if !alive.contains(owner) && old {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -824,6 +864,29 @@ mod tests {
             .into_iter()
             .map(|(pane, _)| pane)
             .collect()
+    }
+
+    #[test]
+    fn the_files_of_a_pane_that_is_gone_are_removed_after_a_while() {
+        let fake = Fake::new("pane-files");
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        let aged = |name: &str, age_ms: u64| {
+            let path = fake.state_dir.join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_millis(EPOCH_MS - age_ms))
+                .unwrap();
+            path
+        };
+        let hour = 60 * MINUTE;
+        let gone_old = aged("draft-w9_p9.txt", 2 * hour);
+        let gone_recent = aged("sleep-w9_p9.lock", MINUTE);
+        let alive_old = aged("preview-w1_p1.txt", 2 * hour);
+        let other = aged("sweep.json", 2 * hour);
+        prune_pane_files(&fake.state_dir, &snapshot_of(&[("w1:p1", None)]), EPOCH_MS);
+        assert!(!gone_old.exists());
+        assert!(gone_recent.exists());
+        assert!(alive_old.exists());
+        assert!(other.exists());
     }
 
     #[test]

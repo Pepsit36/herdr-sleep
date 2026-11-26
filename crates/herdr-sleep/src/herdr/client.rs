@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -177,8 +177,11 @@ impl CommandRunner for ProcessRunner {
             }
         };
 
-        let stdout = stdout.join().unwrap_or_default();
-        let stderr = stderr.join().unwrap_or_default();
+        // The child is gone: what is left to read is already in the pipe, unless
+        // a grandchild still holds it open, which must not hold the caller.
+        let deadline = Instant::now() + DRAIN_GRACE;
+        let stdout = stdout.collect(deadline);
+        let stderr = stderr.collect(deadline);
         Ok(CommandOutput {
             status: status.code(),
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
@@ -214,14 +217,45 @@ fn spawn_with_retry(binary: &Path, args: &[String]) -> std::io::Result<Child> {
     }
 }
 
-fn spawn_reader<R: Read + Send + 'static>(stream: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+/// How long the output of a command that already exited may still arrive.
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// What a reader thread has read so far, and a signal for its end.
+struct Reader {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl Reader {
+    /// The bytes read, once the stream ended or at `deadline`, whichever
+    /// comes first.
+    fn collect(self, deadline: Instant) -> Vec<u8> {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let _ = self.done.recv_timeout(wait);
+        std::mem::take(&mut *self.buffer.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+fn spawn_reader<R: Read + Send + 'static>(stream: Option<R>) -> Reader {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let (sender, done) = mpsc::channel();
+    let shared = Arc::clone(&buffer);
     thread::spawn(move || {
-        let mut buffer = Vec::new();
         if let Some(mut stream) = stream {
-            let _ = stream.read_to_end(&mut buffer);
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stream.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..read]);
+            }
         }
-        buffer
-    })
+        let _ = sender.send(());
+    });
+    Reader { buffer, done }
 }
 
 fn wait_with_timeout(
@@ -438,10 +472,13 @@ impl HerdrClient {
     fn act(&self, args: &[String]) -> Result<(), HerdrError> {
         match self.call_owned(args) {
             Ok(_) => Ok(()),
+            // A clean exit is a success: a warning on stderr or a plain `ok`
+            // on stdout is no failure (an error answer is a JSON object and
+            // was told apart above), and refusing it would report as failed
+            // an action that already happened, `/exit` typed included.
             Err(HerdrError::Exec {
-                status: Some(0),
-                stderr,
-            }) if stderr.is_empty() => Ok(()),
+                status: Some(0), ..
+            }) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -1169,6 +1206,43 @@ mod tests {
         let runner = RecordingRunner::with_stdout("");
         let client = HerdrClient::with_runner("/opt/herdr", runner);
         assert!(client.agent_list().is_err());
+    }
+
+    #[test]
+    fn a_clean_exit_with_a_warning_or_a_plain_ok_is_a_success() {
+        let runner = Arc::new(RecordingRunner::default());
+        runner.outputs.lock().unwrap().push_back(CommandOutput {
+            status: Some(0),
+            stdout: "ok\n".into(),
+            stderr: "warning: a newer herdr is available\n".into(),
+        });
+        let client = HerdrClient::with_runner("/opt/herdr", runner);
+        client.pane_send_text("w1:p1", "x").unwrap();
+        // A failing exit and an error answer still fail.
+        let runner = Arc::new(RecordingRunner::default());
+        runner.outputs.lock().unwrap().push_back(CommandOutput {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: "boom".into(),
+        });
+        let client = HerdrClient::with_runner("/opt/herdr", runner);
+        assert!(client.pane_send_text("w1:p1", "x").is_err());
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipes_does_not_hold_the_caller() {
+        // The shell exits at once; its background child keeps stdout open for
+        // a while.
+        let started = Instant::now();
+        let output = ProcessRunner
+            .run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "echo done; sleep 30 &".into()],
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert!(output.stdout.contains("done"));
     }
 
     #[test]

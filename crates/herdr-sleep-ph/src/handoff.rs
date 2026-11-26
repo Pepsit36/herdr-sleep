@@ -12,7 +12,9 @@ use std::process::{Command, ExitCode, Stdio};
 
 /// Quotes one word for a POSIX shell.
 pub fn shell_quote(word: &str) -> String {
+    // A leading `=` is a command lookup in zsh.
     let plain = !word.is_empty()
+        && !word.starts_with('=')
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
