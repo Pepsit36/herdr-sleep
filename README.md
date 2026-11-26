@@ -159,7 +159,7 @@ exclude_screen_regex = []   # one of the last lines of its screen, e.g. "waiting
 exclude_cmdline_regex = []  # its command line or that of any child, ignored children included
 # Child processes that never block the sleep (case-insensitive regexes).
 # Setting this replaces the built-in list.
-ignore_child_regex = ["mcp", "npm exec", "language-server", "tsserver", "caffeinate",
+ignore_child_regex = ["(^|[\\s/@_-])mcp([\\s/@._-]|$)", "npm exec", "language-server", "tsserver", "caffeinate",
   "<defunct>", "^\\(.*\\)$", "/cursor-agent/versions/"]
 
 # Watcher
