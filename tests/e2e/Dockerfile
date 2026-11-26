@@ -49,7 +49,8 @@ COPY --from=build /out/herdr-sleep /out/herdr-sleep-ph /opt/herdr-sleep/bin/
 COPY --from=build /out/herdr-plugin.toml /opt/herdr-sleep/herdr-plugin.toml
 COPY tests/e2e/run.sh /e2e/run.sh
 
-RUN useradd --create-home --shell /bin/bash tester
+# The user owns the plugin: a scenario installs a new binary over the old one, as an update does.
+RUN useradd --create-home --shell /bin/bash tester && chown -R tester /opt/herdr-sleep
 USER tester
 ENV SHELL=/bin/bash TERM=xterm-256color LANG=C.UTF-8
 WORKDIR /home/tester

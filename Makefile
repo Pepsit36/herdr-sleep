@@ -27,7 +27,7 @@ HERDR_VERSIONS ?= 0.9.2 latest
 .PHONY: help build test check fmt clippy changelog e2e e2e-one link unlink dist clean
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
 
 build: ## Build the release binaries into target/release
 	$(CARGO) build --release --workspace

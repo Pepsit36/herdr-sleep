@@ -44,12 +44,14 @@ clippy:
     - rustup component add clippy
     - cargo clippy --workspace --all-targets --locked -- -D warnings
 
-# The slim image has neither `ps` (process inspection tests) nor `git` (xtask tests).
+# The slim image has neither `ps` (process inspection tests), `git` (xtask tests), `curl`
+# (the publish tests) nor `make` (the dist tests): without them those tests return early and
+# the job passes without having run them.
 test:
   extends: .rust
   stage: test
   script:
-    - apt-get update -qq && apt-get install -y -qq procps git >/dev/null
+    - apt-get update -qq && apt-get install -y -qq procps git curl make >/dev/null
     - cargo test --workspace --locked
 
 # The branch checks on CHANGELOG.md need the default branch and the tags, and
