@@ -77,7 +77,7 @@ case "$1 $2" in
     else cat "$D/agent-sleeping.json"; fi ;;
   "api snapshot") echo '{{"id":"x","result":{{"snapshot":{{}}}}}}' ;;
   "pane read") printf 'output\n\342\235\257 \n' ;;
-  "pane send-keys") touch "$D/enter"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
+  "pane send-text") touch "$D/enter"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
   *) echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
 esac
 "#,
@@ -133,10 +133,10 @@ fn wake_waits_for_the_agent_and_reports_json() {
     let calls = sandbox.calls();
     let enter = calls
         .iter()
-        .position(|c| c == "pane send-keys wC:p1 enter")
+        .position(|c| c == "pane send-text wC:p1 \u{1b}[I")
         .unwrap_or_else(|| panic!("no Enter in {calls:?}"));
     assert_eq!(
-        calls.iter().filter(|c| c.contains("send-keys")).count(),
+        calls.iter().filter(|c| c.contains("send-text")).count(),
         1,
         "{calls:?}"
     );
@@ -163,7 +163,7 @@ fn no_wait_presses_enter_and_returns() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(stdout(&output), "wC:p1 is waking up");
     let calls = sandbox.calls();
-    assert!(calls.contains(&"pane send-keys wC:p1 enter".to_string()));
+    assert!(calls.contains(&"pane send-text wC:p1 \u{1b}[I".to_string()));
     assert!(calls.iter().all(|c| !c.contains("pane read")));
 
     // The focus hook fires twice for one focus: the second wake does nothing
@@ -178,7 +178,7 @@ fn no_wait_presses_enter_and_returns() {
         sandbox
             .calls()
             .iter()
-            .filter(|c| c.contains("send-keys"))
+            .filter(|c| c.contains("send-text"))
             .count(),
         1
     );
@@ -193,7 +193,7 @@ fn an_awake_agent_is_not_touched() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     assert_eq!(report["woke"], false);
     assert_eq!(report["reason"], "not-sleeping");
-    assert!(sandbox.calls().iter().all(|c| !c.contains("send-keys")));
+    assert!(sandbox.calls().iter().all(|c| !c.contains("send-text")));
 }
 
 #[test]

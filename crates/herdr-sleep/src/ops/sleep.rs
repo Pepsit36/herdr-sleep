@@ -406,6 +406,8 @@ pub fn sleep_agent(
         agent.name.as_deref(),
         cwd,
     );
+    // A Wake of the last fifteen seconds must not stop the next one.
+    let _ = std::fs::remove_file(super::wake::wake_stamp_path(&state_dir, pane));
     let freed_mb = freed_kb / 1024;
     journal.log(
         "ASLEEP",

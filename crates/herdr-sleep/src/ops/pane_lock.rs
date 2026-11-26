@@ -23,21 +23,31 @@ pub struct PaneLock {
     _file: File,
 }
 
-fn lock_path(state_dir: &Path, pane: &str) -> PathBuf {
-    state_dir.join(format!("sleep-{}.lock", sanitize_pane(pane)))
+fn lock_path(state_dir: &Path, pane: &str, purpose: &str) -> PathBuf {
+    state_dir.join(format!("{purpose}-{}.lock", sanitize_pane(pane)))
 }
 
 impl PaneLock {
     /// Take the lock of `pane` without waiting. `Ok(None)` means another Sleep
     /// holds it.
     pub fn try_acquire(state_dir: &Path, pane: &str) -> std::io::Result<Option<PaneLock>> {
+        Self::try_acquire_for(state_dir, pane, "sleep")
+    }
+
+    /// The lock of `pane` for another `purpose` (`wake`): locks of different
+    /// purposes do not exclude each other.
+    pub fn try_acquire_for(
+        state_dir: &Path,
+        pane: &str,
+        purpose: &str,
+    ) -> std::io::Result<Option<PaneLock>> {
         fs::create_dir_all(state_dir)?;
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(lock_path(state_dir, pane))?;
+            .open(lock_path(state_dir, pane, purpose))?;
         // SAFETY: `file` owns a valid descriptor for the whole call.
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc == 0 {

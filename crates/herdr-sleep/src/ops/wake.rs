@@ -11,7 +11,7 @@
 //!
 //! A Ready Agent is removed from the registry of sleeping panes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::Config;
@@ -20,6 +20,7 @@ use crate::journal::Journal;
 
 use super::Env;
 use super::markers::sync_markers;
+use super::pane_lock::PaneLock;
 use super::registry::{self, Registry};
 use super::sleep::wait_until;
 
@@ -36,6 +37,16 @@ pub struct WakeOptions {
     /// Wait until the Agent is Ready. Also bypasses the de-duplication, since
     /// the caller asked for this Wake explicitly.
     pub wait: bool,
+}
+
+/// What a Wake types into the Placeholder: a terminal focus-in report. Any
+/// byte wakes it, and it drops the report from the Captured input, so, unlike
+/// Enter, it never ends up in the text typed to the Agent.
+pub const WAKE_SIGNAL: &str = "\u{1b}[I";
+
+/// The file holding the time of the last Wake of `pane`.
+pub(super) fn wake_stamp_path(state_dir: &Path, pane: &str) -> PathBuf {
+    state_dir.join(format!("wake-{}.ts", sanitize_pane(pane)))
 }
 
 /// How a Wake attempt ended.
@@ -82,19 +93,33 @@ pub fn wake_agent(
     let label = agent.name.as_deref().unwrap_or(pane);
     let kind = agent.kind().unwrap_or_default();
 
-    let stamp = state_dir.join(format!("wake-{}.ts", sanitize_pane(pane)));
+    let stamp = wake_stamp_path(&state_dir, pane);
     let now = env.now_millis();
-    if !options.wait && woken_recently(&stamp, now) {
-        return WakeOutcome::Deduplicated;
-    }
-    if let Err(error) = write_atomic(&stamp, &now.to_string()) {
-        return WakeOutcome::Failed(format!("cannot write {}: {error}", stamp.display()));
-    }
-
     let journal = Journal::new(&state_dir);
-    journal.log("WAKE", &format!("{label} ({pane}) kind={kind}"));
-    if let Err(error) = env.send_keys(pane, &["enter"]) {
-        return WakeOutcome::Failed(format!("cannot press Enter: {error}"));
+    {
+        // The focus hooks of a tab, a workspace and a pane run together: the
+        // check of the stamp and its writing must not interleave, or each of
+        // them would wake the pane.
+        let _guard = match PaneLock::try_acquire_for(&state_dir, pane, "wake") {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) if !options.wait => return WakeOutcome::Deduplicated,
+            _ => None,
+        };
+        if !options.wait && woken_recently(&stamp, now) {
+            return WakeOutcome::Deduplicated;
+        }
+        journal.log("WAKE", &format!("{label} ({pane}) kind={kind}"));
+        // The stamp is written once the wake went through: a failed one must
+        // not block the next focus for fifteen seconds.
+        if let Err(error) = env.send_text(pane, WAKE_SIGNAL) {
+            return WakeOutcome::Failed(format!("cannot wake the placeholder: {error}"));
+        }
+        if let Err(error) = write_atomic(&stamp, &now.to_string()) {
+            journal.log(
+                "WARN",
+                &format!("cannot write {}: {error}", stamp.display()),
+            );
+        }
     }
     if !options.wait {
         return WakeOutcome::Woken { ms: 0 };
@@ -245,6 +270,8 @@ pub(super) mod tests {
         /// Time after the first Enter at which the prompt is on screen.
         pub(in crate::ops) prompt_after: Option<Duration>,
         pub(in crate::ops) enter_at: Cell<Option<Duration>>,
+        /// Typing text into the pane fails.
+        pub(in crate::ops) text_fails: bool,
     }
 
     impl Fake {
@@ -269,6 +296,7 @@ pub(super) mod tests {
                 agent_after: Some(Duration::from_millis(2000)),
                 prompt_after: Some(Duration::from_millis(3000)),
                 enter_at: Cell::new(None),
+                text_fails: false,
             }
         }
 
@@ -367,7 +395,14 @@ pub(super) mod tests {
         }
 
         fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
-            self.log(format!("text {pane} {text}"));
+            self.log(format!("text {pane} {}", text.replace('\u{1b}', "ESC")));
+            if self.text_fails {
+                return Err("pane gone".into());
+            }
+            // The wake signal is the first thing the Placeholder reads.
+            if text == WAKE_SIGNAL && self.enter_at.get().is_none() {
+                self.enter_at.set(Some(self.clock()));
+            }
             Ok(())
         }
 
@@ -502,7 +537,7 @@ pub(super) mod tests {
     fn wakes_a_sleeping_agent_without_waiting() {
         let fake = Fake::new("nowait");
         assert_eq!(wake(&fake, NO_WAIT), WakeOutcome::Woken { ms: 0 });
-        assert_eq!(fake.calls(), ["agent worker", "keys w1:p2 enter"]);
+        assert_eq!(fake.calls(), ["agent worker", "text w1:p2 ESC[I"]);
         assert_eq!(fake.events(), ["WAKE"]);
         assert!(fake.journal().contains("WAKE worker (w1:p2) kind=claude"));
         assert_eq!(fake.clock(), Duration::ZERO);
@@ -533,9 +568,31 @@ pub(super) mod tests {
         assert_eq!(wake(&fake, NO_WAIT), WakeOutcome::Woken { ms: 0 });
         fake.advance(Duration::from_millis(14_999));
         assert_eq!(wake(&fake, NO_WAIT), WakeOutcome::Deduplicated);
-        let enters = fake.calls().iter().filter(|c| c.contains("keys")).count();
+        let enters = fake.calls().iter().filter(|c| c.contains("ESC[I")).count();
         assert_eq!(enters, 1);
         assert_eq!(fake.events(), ["WAKE"]);
+    }
+
+    #[test]
+    fn a_failed_wake_does_not_block_the_next_one() {
+        let mut fake = Fake::new("failed-then-ok");
+        fake.agent_after = None;
+        fake.text_fails = true;
+        assert!(matches!(wake(&fake, NO_WAIT), WakeOutcome::Failed(_)));
+        fake.text_fails = false;
+        assert_eq!(wake(&fake, NO_WAIT), WakeOutcome::Woken { ms: 0 });
+    }
+
+    #[test]
+    fn a_wake_waits_on_no_one_but_does_not_double_while_another_holds_the_pane() {
+        let mut fake = Fake::new("wake-lock");
+        fake.agent_after = None;
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        let _other = PaneLock::try_acquire_for(&fake.state_dir, "w1:p2", "wake")
+            .unwrap()
+            .unwrap();
+        assert_eq!(wake(&fake, NO_WAIT), WakeOutcome::Deduplicated);
+        assert!(!fake.calls().iter().any(|c| c.contains("ESC[I")));
     }
 
     #[test]
@@ -572,7 +629,7 @@ pub(super) mod tests {
         let calls = fake.calls();
         let rename = calls.iter().position(|c| c == "rename w1:p2 worker");
         assert!(rename.is_some(), "{calls:?}");
-        assert_eq!(calls[1], "keys w1:p2 enter");
+        assert_eq!(calls[1], "text w1:p2 ESC[I");
         assert_eq!(calls.iter().filter(|c| c.starts_with("rename")).count(), 1);
         assert_eq!(fake.events(), ["WAKE", "READY"]);
         assert!(
