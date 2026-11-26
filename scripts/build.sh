@@ -19,7 +19,11 @@ say() { printf 'herdr-sleep build: %s\n' "$*"; }
 
 tmp=""
 cleanup() { [ -n "$tmp" ] && rm -rf "$tmp"; return 0; }
-trap cleanup EXIT INT TERM
+# A signal ends the script (the EXIT trap then cleans up) instead of letting it
+# carry on with the source build.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Install $1 as bin/$2 without ever rewriting a possibly running executable.
 install_binary() {

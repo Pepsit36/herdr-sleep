@@ -44,7 +44,9 @@ impl ProcessTable {
     /// Read the live process table through `ps`.
     pub fn load() -> io::Result<Self> {
         let output = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,rss=,command="])
+            // `ww` keeps a long command line whole (`--remote-control` at its end),
+            // whatever `COLUMNS` says.
+            .args(["-axwwo", "pid=,ppid=,rss=,command="])
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
