@@ -674,6 +674,38 @@ s21_unsubmitted_text_stays_in_the_prompt() {
   if screen_has "$PANE_A" "got: half typed"; then bad "the text was submitted without Enter"; else ok "the text was not submitted"; fi
 }
 
+s22_an_agent_in_a_nested_shell_stays_awake() {
+  new_world "$CONFIG_MANUAL" || return
+  local split second
+  split="$(herdr pane split "$PANE_A" --direction right --no-focus)"
+  second="$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id // empty' <<<"$split")"
+  [ -n "$second" ] || { bad "pane split gave no pane: $split"; return; }
+  # `nix develop`, `sudo -i` and the like leave a shell between the pane shell and the agent.
+  herdr pane run "$second" "bash" >/dev/null 2>&1
+  sleep 1
+  start_agent "$second" gamma || return
+  local out
+  out="$(hs sleep gamma --json 2>&1)"
+  if grep -q '"reason": *"not-shell-job"' <<<"$out"; then ok "the sleep is refused: not-shell-job"; else bad "sleep said: $out"; fi
+  sleep 3
+  if [ "$(agent_kind "$second")" = "claude" ]; then ok "gamma is still running"; else bad "gamma is '$(agent_kind "$second")'"; fi
+  if screen_has "$second" "/exit"; then bad "the exit command was typed into the agent"; else ok "nothing was typed into the agent"; fi
+  if [ -f "$STATE_DIR/sleepers.json" ] && grep -q "$second" "$STATE_DIR/sleepers.json"; then bad "gamma was registered"; else ok "gamma is not registered"; fi
+}
+
+s23_a_second_restore_leaves_sleeping_panes_alone() {
+  new_world "$CONFIG_MANUAL" || return
+  sleep_alpha || return
+  hs restore >/dev/null 2>&1
+  hs restore >/dev/null 2>&1
+  if is_asleep "$PANE_A"; then ok "alpha still sleeps"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
+  if grep -q "RESTORE-SKIP $PANE_A" "$STATE_DIR/herdr-sleep.log"; then bad "alpha was listed as skipped: $(grep "RESTORE-SKIP $PANE_A" "$STATE_DIR/herdr-sleep.log" | tail -n 1)"; else ok "alpha is not listed as skipped"; fi
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "alpha wakes"; else bad "no wake: kind=$(agent_kind "$PANE_A")"; return; fi
+  sleep 3
+  if screen_has "$PANE_A" "herdr-sleep-ph"; then bad "a Placeholder command reached the agent"; else ok "nothing was typed into the agent"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -696,6 +728,8 @@ SCENARIOS=(
   "s19|overlapping sleeps type once|s19_overlapping_sleeps"
   "s20|an agent the user quit is not restored|s20_a_quit_agent_is_not_restored"
   "s21|unsubmitted text stays in the prompt|s21_unsubmitted_text_stays_in_the_prompt"
+  "s22|an agent in a nested shell stays awake|s22_an_agent_in_a_nested_shell_stays_awake"
+  "s23|a second restore leaves sleeping panes alone|s23_a_second_restore_leaves_sleeping_panes_alone"
 )
 
 # ---------------------------------------------------------------------------

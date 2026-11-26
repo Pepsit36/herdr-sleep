@@ -66,6 +66,10 @@ pub enum Refusal {
     TabUnreadable,
     CwdExcluded(String),
     AgentProcessNotFound,
+    /// The agent is not a job of the pane's own shell (it runs in a nested
+    /// shell, or replaced the shell), so quitting it would not bring the
+    /// shell back to the foreground.
+    NotShellJob,
     ProtectedEnv(String),
     BusyChildren {
         count: usize,
@@ -97,6 +101,7 @@ impl Refusal {
             Refusal::TabUnreadable => "tab-unreadable",
             Refusal::CwdExcluded(_) => "cwd-excluded",
             Refusal::AgentProcessNotFound => "agent-process-not-found",
+            Refusal::NotShellJob => "not-shell-job",
             Refusal::ProtectedEnv(_) => "protected-env",
             Refusal::BusyChildren { .. } => "busy-children",
             Refusal::PromptNotDetected => "prompt-not-detected",
@@ -153,6 +158,9 @@ impl fmt::Display for Refusal {
             ),
             Refusal::CwdExcluded(cwd) => write!(f, "working directory {cwd} is excluded"),
             Refusal::AgentProcessNotFound => f.write_str("agent process not found in the pane"),
+            Refusal::NotShellJob => f.write_str(
+                "the agent is not a job of the pane's shell (nested shell or exec), so quitting it would not return to the shell",
+            ),
             Refusal::ProtectedEnv(var) => write!(f, "protected environment variable {var}"),
             Refusal::BusyChildren { count, first } => {
                 let noun = if *count == 1 { "child" } else { "children" };
@@ -355,6 +363,12 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         .as_ref()
         .and_then(|info| procs::find_agent_process(info, ctx.table, &profile.bin))
         .ok_or(Refusal::AgentProcessNotFound)?;
+    if !info
+        .as_ref()
+        .is_some_and(|info| is_job_of_shell(info, ctx.table))
+    {
+        return Err(Refusal::NotShellJob);
+    }
 
     if let Some(command) = excluded_command(config, ctx.table, pid) {
         return Err(Refusal::CmdlineExcluded(shorten(command)));
@@ -410,6 +424,18 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         }
         Some(PromptState::Empty) => Ok(()),
     }
+}
+
+/// Whether the foreground group of the pane is a job its own shell started:
+/// its leader is a direct child of the shell. Quitting the agent then hands
+/// the foreground back to the shell, which is how a Sleep sees the agent gone.
+/// An agent in a nested shell (`nix develop`, `sudo -i`) leaves that nested
+/// shell in the foreground, and one started with `exec` is the shell itself.
+fn is_job_of_shell(info: &ProcessInfo, table: &ProcessTable) -> bool {
+    info.foreground_process_group_id != info.shell_pid
+        && table
+            .get(info.foreground_process_group_id)
+            .is_some_and(|leader| leader.ppid == info.shell_pid)
 }
 
 /// The first command line of the agent process or of any of its descendants
@@ -1573,6 +1599,25 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_in_a_nested_shell_is_refused() {
+        let mut p = probe(&empty_screen());
+        // `bash` (50) started from the pane shell (10), then the agent.
+        p.info.as_mut().unwrap().shell_pid = 10;
+        let t = ProcessTable::parse("10 1 100 -bash\n50 10 100 bash\n100 50 5000 claude\n");
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::NotShellJob));
+    }
+
+    #[test]
+    fn an_agent_that_replaced_the_shell_is_refused() {
+        let mut p = probe(&empty_screen());
+        p.info.as_mut().unwrap().shell_pid = AGENT_PID;
+        let t = ProcessTable::parse("100 1 5000 claude\n");
+        let r = run(&config(), &agent(), &t, &p, SleepMode::Sweep);
+        assert_eq!(r, Err(Refusal::NotShellJob));
+    }
+
+    #[test]
     fn protected_env() {
         let mut c = config();
         c.protect_env_vars = vec!["KEEP_AWAKE".into(), "OTHER".into()];
@@ -1752,6 +1797,7 @@ mod tests {
             ),
             (Refusal::CwdExcluded("/x".into()), "cwd-excluded"),
             (Refusal::AgentProcessNotFound, "agent-process-not-found"),
+            (Refusal::NotShellJob, "not-shell-job"),
             (Refusal::ProtectedEnv("V".into()), "protected-env"),
             (
                 Refusal::BusyChildren {

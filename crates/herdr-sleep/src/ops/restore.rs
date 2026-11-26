@@ -42,6 +42,7 @@ use crate::journal::Journal;
 use super::Env;
 use super::live_agents::LiveAgents;
 use super::markers::sync_markers;
+use super::pane_lock::PaneLock;
 use super::registry::{Registry, Sleeper};
 use super::sleep::{
     PlaceholderParams, SleepOutcome, is_typeable, placeholder_argv, shell_quote,
@@ -234,9 +235,15 @@ fn candidates(
 ) -> Vec<Candidate> {
     let mut found = Vec::new();
     for (pane, sleeper) in &registry.panes {
-        if snapshot.pane(pane).is_none() {
+        let Some(info) = snapshot.pane(pane) else {
             report.skipped.push((pane.clone(), "pane-gone".into()));
-        } else if !env.dir_exists(&sleeper.cwd) {
+            continue;
+        };
+        // Already a Sleeping agent: a second restore, or a pane that kept it.
+        if info.is_sleeping() {
+            continue;
+        }
+        if !env.dir_exists(&sleeper.cwd) {
             report.missing_cwd.push((pane.clone(), sleeper.cwd.clone()));
         } else {
             found.push(Candidate {
@@ -322,6 +329,24 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
         return report;
     };
     let journal = Journal::new(&state_dir);
+    // One restore at a time: a second one, typed by hand while the startup
+    // one is still working, would type the Placeholder command into the same
+    // panes again, and the copy would be replayed into the agent at its Wake.
+    let _lock = match PaneLock::try_acquire_for(&state_dir, "all", "restore") {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            let reason = "another restore is running".to_string();
+            journal.log("RESTORE-SKIP", &format!("all {reason}"));
+            report.error = Some(reason);
+            return report;
+        }
+        Err(error) => {
+            let reason = format!("cannot lock the restore: {error}");
+            journal.log("WARN", &format!("restore: {reason}"));
+            report.error = Some(reason);
+            return report;
+        }
+    };
     let snapshot = match env.snapshot() {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -407,6 +432,16 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
                     .is_err_and(|skip| skip.reason == PaneState::SessionHeld.reason())
             {
                 candidate.saved = true;
+                // The session Herdr holds is the one to resume: the registry
+                // may name an older one.
+                if let Some(pane) = snapshot.pane(&candidate.pane)
+                    && let Ok(mut held) = saved_sleeper(env, config, pane)
+                {
+                    if held.name.is_none() {
+                        held.name = candidate.sleeper.name.clone();
+                    }
+                    candidate.sleeper = held;
+                }
                 outcome = restore_pane(
                     env,
                     config,
@@ -2002,6 +2037,28 @@ mod tests {
             fake.journal()
                 .contains(&"RESTORE-SKIP w1-9 sleeping-agent-not-registered".to_string())
         );
+    }
+
+    #[test]
+    fn a_registered_pane_that_already_sleeps_is_left_alone_without_a_word() {
+        let mut fake = Fake::new("second-restore").pane("w1-2", Spec::ready());
+        fake.register("w1-9", "claude", "sess-9", None, "/work");
+        fake.unknown_sleepers = vec!["w1-9".into()];
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w1-2"]);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    }
+
+    #[test]
+    fn a_second_restore_waits_for_nothing_and_types_nothing() {
+        let fake = Fake::new("two-restores").pane("w1-2", Spec::ready());
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        let _first = PaneLock::try_acquire_for(&fake.state_dir, "all", "restore")
+            .unwrap()
+            .unwrap();
+        let report = run(&fake);
+        assert_eq!(report.error.as_deref(), Some("another restore is running"));
+        assert!(fake.runs().is_empty());
     }
 
     #[test]

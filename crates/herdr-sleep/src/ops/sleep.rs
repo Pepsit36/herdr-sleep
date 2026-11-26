@@ -284,15 +284,45 @@ pub fn sleep_agent(
         );
     };
 
-    // 4. Quit the agent through its exit command.
-    journal.log("SLEEP", &format!("{label} ({pane}) kind={kind}"));
+    // 4. Quit the agent through its exit command. The pane is registered
+    // first: an agent that takes longer than the wait to quit leaves a bare
+    // shell behind, and the entry is what lets `restore` put the Placeholder
+    // there. It is withdrawn when the agent is still running after an abandon.
+    let cwd = agent.effective_cwd().unwrap_or(".");
+    journal.log(
+        "SLEEP",
+        &format!("{label} ({pane}) kind={kind} session={session}"),
+    );
+    register(
+        env,
+        &journal,
+        pane,
+        kind,
+        session,
+        agent.name.as_deref(),
+        cwd,
+    );
+    // A Wake of the last fifteen seconds must not stop the next one, and a
+    // stamp left from an earlier Wake would make the Sweep take this pane's
+    // entry for a stale one.
+    let _ = std::fs::remove_file(super::wake::wake_stamp_path(&state_dir, pane));
+    let withdraw = || {
+        if let Err(error) = Registry::remove(&state_dir, pane) {
+            journal.log(
+                "WARN",
+                &format!("{pane}: cannot update {}: {error}", registry::FILE_NAME),
+            );
+        }
+    };
     if let Err(error) = env.send_text(pane, &profile.exit) {
         undo(false);
+        withdraw();
         return abort(format!("cannot type the exit command: {error}"));
     }
     env.sleep(KEY_DELAY);
     if let Err(error) = env.send_keys(pane, &["enter"]) {
         undo(true);
+        withdraw();
         return abort(format!("cannot press Enter: {error}"));
     }
     let mut second_enter = false;
@@ -308,6 +338,17 @@ pub fn sleep_agent(
     });
     if !quit {
         undo(true);
+        // The agent may have quit while the keys were being undone: then the
+        // entry stays, for the pane is a plain shell that only `restore` can
+        // turn back into a Sleeping agent.
+        if env.process_info(pane).is_ok_and(|info| !info.at_shell()) {
+            withdraw();
+        } else {
+            journal.log(
+                "WARN",
+                &format!("{label} ({pane}): the agent quit after the sleep was abandoned"),
+            );
+        }
         return abort(format!(
             "agent still running after {}s",
             QUIT_TIMEOUT.as_secs()
@@ -337,7 +378,6 @@ pub fn sleep_agent(
         .unwrap_or_else(|| "/bin/sh".into());
     let main_bin = env.main_bin();
     let herdr_bin = env.herdr_bin();
-    let cwd = agent.effective_cwd().unwrap_or(".");
     let argv = placeholder_argv(
         &placeholder,
         &PlaceholderParams {
@@ -397,6 +437,8 @@ pub fn sleep_agent(
         sync_markers(env, config);
         return SleepOutcome::Warned(reason);
     }
+    // The entry written before the exit is refreshed with the time of the
+    // announce.
     register(
         env,
         &journal,
@@ -406,8 +448,6 @@ pub fn sleep_agent(
         agent.name.as_deref(),
         cwd,
     );
-    // A Wake of the last fifteen seconds must not stop the next one.
-    let _ = std::fs::remove_file(super::wake::wake_stamp_path(&state_dir, pane));
     let freed_mb = freed_kb / 1024;
     journal.log(
         "ASLEEP",
@@ -1099,16 +1139,28 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_or_aborted_sleep_registers_nothing() {
+    fn a_refused_or_abandoned_sleep_of_a_running_agent_registers_nothing() {
         let mut fake = Fake::new("registry-refused");
         fake.guards = Err(Refusal::DraftInPrompt);
         run(&fake, SleepMode::Manual);
-        let mut fake_aborted = Fake::new("registry-aborted");
-        fake_aborted.release_after = None;
-        run(&fake_aborted, SleepMode::Manual);
-        for fake in [&fake, &fake_aborted] {
+        let mut fake_abandoned = Fake::new("registry-abandoned");
+        fake_abandoned.quit_after = None;
+        run(&fake_abandoned, SleepMode::Manual);
+        for fake in [&fake, &fake_abandoned] {
             assert!(Registry::load(fake.dir()).panes.is_empty());
         }
+    }
+
+    #[test]
+    fn an_agent_that_quit_before_the_placeholder_started_stays_registered() {
+        // The pane is a bare shell then: `restore` is the only way back.
+        let mut fake = Fake::new("registry-aborted");
+        fake.release_after = None;
+        assert!(matches!(
+            run(&fake, SleepMode::Manual),
+            SleepOutcome::Aborted(_)
+        ));
+        assert!(Registry::load(fake.dir()).panes.contains_key("w1-2"));
     }
 
     #[test]
@@ -1354,7 +1406,10 @@ mod tests {
             calls[last_keys],
             "keys w1-2 backspace backspace backspace backspace backspace"
         );
-        assert_eq!(calls.last().unwrap(), "text w1-2 half a thought");
+        assert_eq!(
+            calls.iter().rfind(|c| c.starts_with("text")).unwrap(),
+            "text w1-2 half a thought"
+        );
         assert!(!fake.dir().join("draft-w1-2.txt").exists());
     }
 

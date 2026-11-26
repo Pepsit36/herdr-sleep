@@ -220,7 +220,9 @@ is replayed into the agent once it is ready.
 - **An agent never sleeps.** `herdr-sleep status` shows the last refusal per agent: `draft-in-prompt`
   (text typed at the prompt: set `sleep_with_draft = true` to sleep anyway and get a one-row draft
   back at wake), `busy-children` (a child process is running; add it to
-  `ignore_child_regex` if it is harmless), `prompt-not-detected` (the screen shows no prompt that
+  `ignore_child_regex` if it is harmless), `not-shell-job` (the agent was not started by the pane's
+  own shell: it runs in a nested shell such as `nix develop` or `sudo -i`, or replaced the shell with
+  `exec`, so quitting it would not bring the shell back; start it from the pane's shell), `prompt-not-detected` (the screen shows no prompt that
   matches the agent's `prompt_regex`, which makes the plugin refuse rather than guess; the prompt
   is searched between the last two rules of the screen (`prompt_frame_regex`) and, without a frame,
   in the last `prompt_area_lines` rows: raise `prompt_area_lines` or adapt `prompt_frame_regex` when
