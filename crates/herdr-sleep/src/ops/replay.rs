@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::journal::Journal;
 
 use super::Env;
+use super::markers::sync_markers;
 use super::wake::{READY_TIMEOUT, await_ready, forget, restore_name};
 
 /// Pause between typing the text and pressing Enter, so a menu opened by the
@@ -82,6 +83,9 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
     }
     restore_name(env, &journal, pane, args.name.as_deref());
     forget(&journal, &state_dir, pane);
+    // The pane no longer sleeps: its tab must lose the sleep prefix now, not
+    // at the next sleep somewhere.
+    sync_markers(env, config);
 
     if let Err(error) = std::fs::remove_file(&args.file) {
         journal.log(
@@ -151,6 +155,7 @@ mod tests {
             tail,
             [
                 "rename w1:p2 worker",
+                "snapshot",
                 "text w1:p2 fix the build",
                 "keys w1:p2 enter"
             ]
@@ -160,6 +165,17 @@ mod tests {
         assert_eq!(fake.clock(), Duration::from_millis(3300));
         assert_eq!(fake.events(), ["REPLAY"]);
         assert!(fake.journal().trim_end().ends_with("REPLAY w1:p2 bytes=13"));
+    }
+
+    #[test]
+    fn the_markers_are_resynchronised_as_soon_as_the_agent_is_back() {
+        // A woken pane leaves the registry; its tab must lose the sleep
+        // prefix then, not whenever another agent next goes to sleep.
+        let (fake, args) = setup("markers", "");
+        replay(&fake, &Config::default(), &args);
+        let calls = fake.calls();
+        let rename = calls.iter().position(|c| c.starts_with("rename")).unwrap();
+        assert_eq!(calls.get(rename + 1).map(String::as_str), Some("snapshot"));
     }
 
     #[test]
@@ -178,6 +194,7 @@ mod tests {
             tail,
             [
                 "rename w1:p2 worker",
+                "snapshot",
                 "text w1:p2 fix the build",
                 "keys w1:p2 enter",
                 "text w1:p2 half a thought"

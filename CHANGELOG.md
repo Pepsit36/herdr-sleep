@@ -14,6 +14,20 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-25
+
+<!-- stamped -->
+
+### Fixed
+
+- **Sleep marker:** the tab of a pane you woke keeps its 💤 prefix no longer. The prefix used to
+  stay until another agent went to sleep somewhere, so a tab whose agent had quit since still
+  looked asleep, and a restart then left it as a plain shell without any trace. The markers are now
+  brought in line as soon as a woken agent is back, and on every sweep, even when nothing sleeps.
+- **Restart:** a pane that Herdr shows as a sleeping agent while the plugin has no record of it
+  (so nothing to restore it from) is now listed in the journal as `RESTORE-SKIP <pane>
+  sleeping-agent-not-registered` instead of being passed over in silence.
+
 ## [0.6.3] - 2026-11-25
 
 <!-- stamped -->

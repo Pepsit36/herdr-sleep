@@ -244,10 +244,9 @@ fn sweep_pass(
     {
         Journal::new(&dir).log("WARN", &format!("cannot save {STATE_FILE}: {error}"));
     }
-    // One synchronisation per pass heals a marker the per-sleep ones missed.
-    if !report.slept.is_empty() {
-        sync_markers(env, config);
-    }
+    // One synchronisation per pass heals a marker the per-sleep ones missed,
+    // such as the prefix of a tab whose agent was woken and has quit since.
+    sync_markers(env, config);
     report
 }
 
@@ -272,6 +271,7 @@ mod tests {
         focused: RefCell<Option<String>>,
         refusals: RefCell<HashMap<String, Refusal>>,
         snapshot_error: Cell<bool>,
+        snapshots: Cell<usize>,
         panes: RefCell<Vec<String>>,
     }
 
@@ -293,6 +293,7 @@ mod tests {
                 focused: RefCell::new(None),
                 refusals: RefCell::new(HashMap::new()),
                 snapshot_error: Cell::new(false),
+                snapshots: Cell::new(0),
                 panes: RefCell::new(Vec::new()),
             }
         }
@@ -338,6 +339,7 @@ mod tests {
 
     impl Env for Fake {
         fn snapshot(&self) -> EnvResult<Snapshot> {
+            self.snapshots.set(self.snapshots.get() + 1);
             if self.snapshot_error.get() {
                 return Err("socket closed".into());
             }
@@ -591,6 +593,19 @@ mod tests {
         assert_eq!(report.deferred, 2);
         // A dry run leaves the agents awake, so the same ones are due again.
         assert_eq!(pass(&fake, &config, &mut state).dry_run.len(), 3);
+    }
+
+    #[test]
+    fn every_pass_checks_the_markers_even_when_nothing_sleeps() {
+        // The prefix of a tab whose woken agent has quit is only ever
+        // cleared by a synchronisation: a pass that sleeps nothing does one.
+        let fake = Fake::new("markers-every-pass");
+        fake.add("w1:p1", AgentStatus::Working, 1);
+        let mut state = SweepState::default();
+        let report = sweep_once(&fake, &Config::default(), &mut state);
+        assert!(report.slept.is_empty());
+        // One read of the session for the sweep, one for the markers.
+        assert_eq!(fake.snapshots.get(), 2);
     }
 
     #[test]
