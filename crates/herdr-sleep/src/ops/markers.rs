@@ -81,10 +81,8 @@ impl MarkersState {
     /// Write the state to `state_dir` atomically (temporary file, then rename).
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(state_dir)?;
-        let tmp = state_dir.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string(self).map_err(std::io::Error::other)?;
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, Self::path(state_dir))
+        super::atomic::write(&Self::path(state_dir), &text)
     }
 }
 

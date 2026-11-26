@@ -8,9 +8,8 @@
 //! tolerant: a missing or garbled file is an empty registry, because the
 //! worst consequence is a pane that stays a plain shell after a restart.
 //!
-//! Updates are read-modify-write without a lock. Two processes updating
-//! different panes at the same instant can lose one update; every writer
-//! re-reads the file first, so the window is a few microseconds.
+//! Updates are read-modify-write under a lock (`sleepers.lock`), so two
+//! processes updating different panes at the same instant lose nothing.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -20,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 /// Name of the registry file inside the state directory.
 pub const FILE_NAME: &str = "sleepers.json";
+
+/// Name of the lock file (`sleepers.lock`) that serialises the updates.
+const LOCK_NAME: &str = "sleepers";
 
 /// What is needed to put the Placeholder of one pane back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,30 +64,38 @@ impl Registry {
     /// Write the registry atomically.
     pub fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(state_dir)?;
-        let tmp = state_dir.join(format!("{FILE_NAME}.tmp"));
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, Self::path(state_dir))
+        super::atomic::write(&Self::path(state_dir), &text)
     }
 
     /// Record `sleeper` for `pane`, replacing any previous entry.
     pub fn add(state_dir: &Path, pane: &str, sleeper: Sleeper) -> std::io::Result<()> {
-        let mut registry = Self::load(state_dir);
-        registry.panes.insert(pane.to_string(), sleeper);
-        registry.save(state_dir)
+        super::atomic::locked(state_dir, LOCK_NAME, || {
+            let mut registry = Self::load(state_dir);
+            registry.panes.insert(pane.to_string(), sleeper);
+            registry.save(state_dir)
+        })
     }
 
     /// Forget `pane`. Nothing is written when it was not registered.
     pub fn remove(state_dir: &Path, pane: &str) -> std::io::Result<()> {
-        let mut registry = Self::load(state_dir);
-        if registry.panes.remove(pane).is_none() {
-            return Ok(());
-        }
-        registry.save(state_dir)
+        super::atomic::locked(state_dir, LOCK_NAME, || {
+            let mut registry = Self::load(state_dir);
+            if registry.panes.remove(pane).is_none() {
+                return Ok(());
+            }
+            registry.save(state_dir)
+        })
     }
 
     /// Forget every pane that is not in `alive`; the panes forgotten.
     pub fn prune(state_dir: &Path, alive: &HashSet<&str>) -> std::io::Result<Vec<String>> {
+        super::atomic::locked(state_dir, LOCK_NAME, || {
+            Self::prune_locked(state_dir, alive)
+        })
+    }
+
+    fn prune_locked(state_dir: &Path, alive: &HashSet<&str>) -> std::io::Result<Vec<String>> {
         let mut registry = Self::load(state_dir);
         let gone: Vec<String> = registry
             .panes
@@ -226,11 +236,12 @@ mod tests {
     fn saving_leaves_no_temporary_file() {
         let dir = temp_dir("atomic");
         Registry::add(&dir, "p1", sleeper("a")).unwrap();
-        let names: Vec<String> = fs::read_dir(&dir)
+        let mut names: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, [FILE_NAME]);
+        names.sort();
+        assert_eq!(names, [FILE_NAME, "sleepers.lock"]);
         let text = fs::read_to_string(Registry::path(&dir)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["panes"]["p1"]["since_ms"], 42);
