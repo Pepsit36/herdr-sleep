@@ -229,7 +229,14 @@ pub fn wake(target: Option<&str>, wait: bool, json: bool) -> ExitCode {
         let label = agent
             .as_ref()
             .map_or(target.as_str(), |a| a.name.as_deref().unwrap_or(&a.pane_id));
-        emit(&describe_wake(label, &outcome, wait));
+        let line = describe_wake(label, &outcome, wait);
+        // A failure goes where `sleep` puts its own, so scripts read one place.
+        match outcome {
+            WakeOutcome::NotFound | WakeOutcome::Failed(_) | WakeOutcome::TimedOut => {
+                eprintln!("herdr-sleep: {line}");
+            }
+            _ => emit(&line),
+        }
     }
     wake_exit_code(&outcome)
 }

@@ -254,7 +254,15 @@ fn parse_sleep(args: impl Iterator<Item = String>) -> Invocation {
     let mut wait_error = None;
     let mut rest = Vec::new();
     let mut options_ended = false;
+    let mut after_wait = false;
     for arg in args {
+        // `--wait 45` would otherwise name a pane '45' and fail much later.
+        if after_wait && !arg.is_empty() && arg.chars().all(|c| c.is_ascii_digit()) {
+            wait_error.get_or_insert(format!(
+                "sleep: --wait takes its seconds as --wait={arg}, not as a separate word"
+            ));
+        }
+        after_wait = !options_ended && arg == "--wait";
         if options_ended || !arg.starts_with("--wait") {
             options_ended |= arg == "--";
             rest.push(arg);
@@ -420,6 +428,7 @@ mod tests {
         for bad in ["--wait=0", "--wait=x", "--wait="] {
             assert!(usage(&["sleep", bad]).contains("--wait expects"), "{bad}");
         }
+        assert!(usage(&["sleep", "w1:p2", "--wait", "45"]).contains("--wait=45"));
         // After `--`, a target may look like the option.
         assert_eq!(
             parse(&["sleep", "--", "--wait"]),

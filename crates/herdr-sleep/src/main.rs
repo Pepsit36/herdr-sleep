@@ -17,11 +17,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() -> ExitCode {
     match parse_args(std::env::args().skip(1)) {
         Invocation::Help(topic) => {
-            print!("{}", help::text(topic));
+            cli::emit(help::text(topic).trim_end_matches('\n'));
             ExitCode::SUCCESS
         }
         Invocation::Version => {
-            println!("herdr-sleep {VERSION}");
+            cli::emit(&format!("herdr-sleep {VERSION}"));
             ExitCode::SUCCESS
         }
         Invocation::Sleep {
