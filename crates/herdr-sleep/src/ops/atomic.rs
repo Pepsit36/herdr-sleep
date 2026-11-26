@@ -12,6 +12,11 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Replace the content of `path` with `text`. The temporary file sits next to
 /// `path` and carries the process and a counter in its name.
 pub fn write(path: &Path, text: &str) -> io::Result<()> {
+    write_bytes(path, text.as_bytes())
+}
+
+/// [`write`] for content that may not be UTF-8 (a journal cut mid-character).
+pub fn write_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -21,7 +26,7 @@ pub fn write(path: &Path, text: &str) -> io::Result<()> {
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, path));
+    let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, path));
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
     }

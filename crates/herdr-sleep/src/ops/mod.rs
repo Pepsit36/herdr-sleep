@@ -3,7 +3,7 @@
 //! Every operation talks to the outside world through [`Env`], so its
 //! sequence of steps can be tested with a scripted fake and a virtual clock.
 
-mod atomic;
+pub(crate) mod atomic;
 mod env;
 pub mod event;
 pub mod keep_awake;

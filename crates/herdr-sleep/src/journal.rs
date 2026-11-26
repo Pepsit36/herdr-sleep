@@ -70,13 +70,21 @@ impl Journal {
     }
 
     fn truncate_oldest_half(&self) -> std::io::Result<()> {
-        let bytes = fs::read(&self.path)?;
-        let mut start = bytes.len() / 2;
-        // Restart on a line boundary.
-        if let Some(offset) = bytes[start..].iter().position(|&b| b == b'\n') {
-            start += offset + 1;
-        }
-        fs::write(&self.path, &bytes[start..])
+        let dir = self.path.parent().unwrap_or(Path::new("."));
+        // Under the journal lock and by rename, so a process trimming the file never
+        // overwrites the lines another one appends meanwhile.
+        crate::ops::atomic::locked(dir, "journal", || {
+            let bytes = fs::read(&self.path)?;
+            if bytes.len() as u64 <= MAX_BYTES {
+                // Another process trimmed it first.
+                return Ok(());
+            }
+            let mut start = bytes.len() / 2;
+            if let Some(offset) = bytes[start..].iter().position(|&b| b == b'\n') {
+                start += offset + 1;
+            }
+            crate::ops::atomic::write_bytes(&self.path, &bytes[start..])
+        })
     }
 }
 
