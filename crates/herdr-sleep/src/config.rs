@@ -28,7 +28,7 @@ const PLUGIN_ID: &str = "pepsit36.herdr-sleep";
 
 /// Built-in `ignore_child_regex`: child processes that never count as work.
 pub const DEFAULT_IGNORE_CHILD_REGEX: [&str; 8] = [
-    "mcp",
+    r"(^|[\s/@_-])mcp([\s/@._-]|$)",
     "npm exec",
     "language-server",
     "tsserver",
@@ -1316,6 +1316,8 @@ exclude_names = ["b"]"#);
         assert!(c.child_ignored("(grep)"));
         assert!(c.child_ignored("NPM EXEC foo"));
         assert!(!c.child_ignored("node server.js"));
+        // "mcp" is a word of its own: a build of a project that merely contains it is work.
+        assert!(!c.child_ignored("cargo build --package mcpkit"));
     }
 
     #[test]
@@ -1489,7 +1491,7 @@ exclude_names = ["b"]"#);
     #[test]
     fn serializes_regexes_as_sources() {
         let v = json(&Config::default());
-        assert_eq!(v["ignore_child_regex"][0], "mcp");
+        assert_eq!(v["ignore_child_regex"][0], DEFAULT_IGNORE_CHILD_REGEX[0]);
         assert_eq!(v["profiles"]["claude"]["prompt_regex"], r"^\s*\u{276F}");
         assert_eq!(v["sleep_statuses"], serde_json::json!(["idle", "done"]));
     }

@@ -14,6 +14,16 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-26
+
+<!-- stamped -->
+
+### Fixed
+
+- The journal no longer loses lines when two processes write at the moment it is trimmed.
+- The built-in list of ignored children matches `mcp` as a word, so a build of a project whose
+  name merely contains it is no longer taken for an idle MCP server.
+
 ## [0.7.5] - 2026-11-26
 
 <!-- stamped -->
