@@ -121,6 +121,61 @@ pub struct Reporter<'a> {
     seq: Seq,
 }
 
+/// Longest wait for one `herdr` call. A server that does not answer must not
+/// keep the Placeholder from listening to the keyboard.
+const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a finished `herdr` call left.
+struct CallOutput {
+    success: bool,
+    stdout: String,
+}
+
+/// Run `program args` and wait at most `timeout`. `Ok(None)` when it did not
+/// finish in time (the child is killed).
+fn run_with_timeout(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+) -> std::io::Result<Option<CallOutput>> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut stdout = child.stdout.take();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(out) = stdout.as_mut() {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(out, &mut bytes);
+            text = String::from_utf8_lossy(&bytes).into_owned();
+        }
+        let _ = sender.send(text);
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        sleep(Duration::from_millis(20));
+    };
+    let stdout = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default();
+    Ok(Some(CallOutput {
+        success: status.success(),
+        stdout,
+    }))
+}
+
 impl<'a> Reporter<'a> {
     pub fn new(args: &'a Args) -> Self {
         Reporter {
@@ -130,18 +185,17 @@ impl<'a> Reporter<'a> {
     }
 
     fn run(&self, argv: &[String]) -> bool {
-        let status = Command::new(&self.args.herdr_bin)
-            .args(argv)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => true,
-            Ok(s) => {
+        match run_with_timeout(&self.args.herdr_bin, argv, CALL_TIMEOUT) {
+            Ok(Some(out)) if out.success => true,
+            Ok(Some(_)) => {
+                eprintln!("herdr-sleep-ph: `herdr {}` failed", argv[..2].join(" "));
+                false
+            }
+            Ok(None) => {
                 eprintln!(
-                    "herdr-sleep-ph: `herdr {}` failed: {s}",
-                    argv[..2].join(" ")
+                    "herdr-sleep-ph: `herdr {}` did not answer in {} s",
+                    argv[..2].join(" "),
+                    CALL_TIMEOUT.as_secs()
                 );
                 false
             }
@@ -152,17 +206,11 @@ impl<'a> Reporter<'a> {
         }
     }
 
-    /// Standard output of `herdr <argv>`, `None` when it failed.
+    /// Standard output of `herdr <argv>`, `None` when it failed or did not
+    /// answer in time.
     fn output(&self, argv: &[String]) -> Option<String> {
-        let out = Command::new(&self.args.herdr_bin)
-            .args(argv)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = run_with_timeout(&self.args.herdr_bin, argv, CALL_TIMEOUT).ok()??;
+        out.success.then_some(out.stdout)
     }
 
     /// The Sleeping agent identity: state, session and name.
@@ -232,6 +280,27 @@ impl<'a> Reporter<'a> {
 mod tests {
     use super::*;
     use crate::args::sample;
+
+    #[test]
+    fn a_call_that_does_not_answer_is_given_up() {
+        let started = Instant::now();
+        let out = run_with_timeout("sleep", &["5".into()], Duration::from_millis(200)).unwrap();
+        assert!(out.is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_call_that_answers_gives_its_output_and_status() {
+        let ok = run_with_timeout("sh", &["-c".into(), "echo hi".into()], CALL_TIMEOUT)
+            .unwrap()
+            .unwrap();
+        assert!(ok.success);
+        assert_eq!(ok.stdout.trim(), "hi");
+        let failed = run_with_timeout("sh", &["-c".into(), "exit 3".into()], CALL_TIMEOUT)
+            .unwrap()
+            .unwrap();
+        assert!(!failed.success);
+    }
 
     #[test]
     fn report_agent_declares_identity_without_a_resume_command() {

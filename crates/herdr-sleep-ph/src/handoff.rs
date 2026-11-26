@@ -2,7 +2,7 @@
 //! the terminal and `exec` the user's shell to Wake the Agent.
 
 use crate::args::Args;
-use crate::input::printable;
+use crate::input::captured as capture_of;
 use crate::tty::RawMode;
 use std::fs;
 use std::io;
@@ -185,7 +185,14 @@ fn working_dir(cwd: &str) -> PathBuf {
 /// this process by the user's shell. Only returns when nothing could be
 /// executed.
 pub fn run(args: &Args, raw: Option<RawMode>, captured: &[u8]) -> ExitCode {
-    let text = printable(captured);
+    // The file holds the text, and a final newline when the user pressed
+    // Enter after it: the Replay presses Enter only then.
+    let typed = capture_of(captured);
+    let text = if typed.submitted && !typed.text.is_empty() {
+        format!("{}\n", typed.text)
+    } else {
+        typed.text
+    };
     // Started even with nothing to type: the Replay also gives the pane its
     // name back, which Herdr forgot while the Placeholder held the pane.
     let file = replay_path(&args.state_dir, &args.pane);

@@ -87,8 +87,9 @@ fn read_chunk(data: &mut Vec<u8>) -> bool {
 /// silent for 250 ms (or 64 KiB were read) and returns everything read.
 ///
 /// Without a terminal there is nothing to wait for: the process sleeps until
-/// a signal ends it.
-pub fn capture(is_tty: bool) -> Vec<u8> {
+/// a signal ends it. `None` when the terminal went away (end of input or an
+/// error before any key): nobody asked for a Wake.
+pub fn capture(is_tty: bool) -> Option<Vec<u8>> {
     if !is_tty {
         loop {
             // SAFETY: `pause` has no preconditions.
@@ -100,11 +101,11 @@ pub fn capture(is_tty: bool) -> Vec<u8> {
         match poll_in(-1) {
             Ok(true) => break,
             Ok(false) => {}
-            Err(_) => return data,
+            Err(_) => return None,
         }
     }
     if !read_chunk(&mut data) {
-        return data;
+        return None;
     }
     while data.len() < CAP {
         match poll_in(SILENCE_MS) {
@@ -112,5 +113,5 @@ pub fn capture(is_tty: bool) -> Vec<u8> {
             _ => break,
         }
     }
-    data
+    Some(data)
 }
