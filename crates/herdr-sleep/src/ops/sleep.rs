@@ -408,6 +408,9 @@ pub fn sleep_agent(
     if env.agent(pane).is_ok_and(|current| current.is_sleeping()) {
         return abort("the pane already holds a placeholder".into());
     }
+    // Whatever the user typed while the agent was quitting would be glued to
+    // the command line: clear the line first.
+    let _ = env.send_keys(pane, &["ctrl+u"]);
     let quoted: Vec<String> = argv.iter().map(|word| shell_quote(word)).collect();
     let mut command: Vec<&str> = vec!["exec"];
     command.extend(quoted.iter().map(String::as_str));
@@ -664,7 +667,9 @@ pub fn is_typeable(word: &str) -> bool {
 /// Words made only of safe characters are left alone, which keeps the typed
 /// command readable. The single-quote form `'\''` also works in fish.
 pub fn shell_quote(word: &str) -> String {
+    // A leading `=` is a command lookup in zsh.
     let safe = !word.is_empty()
+        && !word.starts_with('=')
         && word
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c));
@@ -1213,7 +1218,9 @@ mod tests {
         assert_eq!(calls[position("run ")], expected_run);
         // The Sleeping agent is awaited after the run.
         assert_eq!(calls[position("run ") + 1], "agent w1-2");
-        assert_eq!(calls.iter().filter(|c| c.starts_with("keys")).count(), 1);
+        // Enter after the exit command, then Ctrl+U just before the exec line.
+        assert_eq!(calls.iter().filter(|c| c.starts_with("keys")).count(), 2);
+        assert_eq!(calls[position("run ") - 1], "keys w1-2 ctrl+u");
 
         let journal = fake.journal();
         let events: Vec<&str> = journal
@@ -1476,7 +1483,10 @@ mod tests {
     fn without_the_setting_the_draft_is_left_alone() {
         let fake = drafting("draft-off", "half a thought");
         run(&fake, SleepMode::Force);
-        assert!(!fake.calls().iter().any(|c| c.contains("ctrl+u")));
+        // The line is cleared once the agent is gone, never the prompt before.
+        let calls = fake.calls();
+        let exit = calls.iter().position(|c| c == "text w1-2 /exit").unwrap();
+        assert!(!calls[..exit].iter().any(|c| c.contains("ctrl+u")));
         assert!(!fake.dir().join("draft-w1-2.txt").exists());
     }
 
@@ -1489,7 +1499,7 @@ mod tests {
         assert_eq!(
             fake.calls()
                 .iter()
-                .filter(|c| c.starts_with("keys"))
+                .filter(|c| c.starts_with("keys w1-2 enter"))
                 .count(),
             2
         );
@@ -1736,6 +1746,8 @@ mod tests {
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
         assert_eq!(shell_quote("$HOME;rm"), "'$HOME;rm'");
         assert_eq!(shell_quote("\u{1f4a4}"), "'\u{1f4a4}'");
+        assert_eq!(shell_quote("=ls"), "'=ls'");
+        assert_eq!(shell_quote("a=b"), "a=b");
     }
 
     #[test]
