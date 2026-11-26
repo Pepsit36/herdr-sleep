@@ -38,6 +38,11 @@ a published entry is frozen, typo included.
 - **Watcher:** with a configuration that does not load at startup, the watcher puts nothing to sleep
   (it used the defaults, ignoring `dry_run` and exclusions), and `restore` starts no agent. Both say
   so in the journal.
+- **Sleep:** a manual sleep that meets a sleep already running on the same pane waits for it and
+  reports the real outcome, instead of answering `superseded`.
+- **Restart:** an agent you quit just before stopping the server is not brought back, even when no
+  sweep ran in between: the pane's shell, older than the last time the agent was seen, tells a quit
+  from a restart.
 - **Install:** the minimum Rust version is 1.88, which the code needs, and a signal during
   `scripts/build.sh` ends the script instead of continuing with a source build. Long command lines
   are no longer cut by `ps`, which hid `--remote-control` at their end.

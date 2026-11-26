@@ -5,10 +5,11 @@
 //! of a registry entry. The Sweep refreshes it on every pass from what Herdr
 //! reports (kind, session, name, working directory of each managed Agent).
 //! A record is dropped when its pane is gone, when the pane holds a sleeping
-//! Agent (the registry takes over), when the Watcher saw the Agent quit, or
-//! when nobody saw the Agent for [`MAX_AGE`]. A pane that shows no Agent
-//! simply because Herdr just restarted keeps its record: only an Agent that
-//! this very Watcher saw alive and then gone counts as quit.
+//! Agent (the registry takes over), when the Agent was seen quitting, or when
+//! nobody saw the Agent for [`MAX_AGE`]. A pane that shows no Agent simply
+//! because Herdr just restarted keeps its record. A quit is told from a
+//! restart by what this very Watcher saw alive and then gone, and by the pane
+//! shell: older than the last sighting means it was there all along.
 //!
 //! Writes are atomic and reads tolerant, like the registry: a missing or
 //! garbled file is an empty record, and the worst consequence is a pane that
@@ -66,14 +67,17 @@ impl LiveAgents {
 
     /// Bring the record in line with `snapshot`. `alive` holds the panes this
     /// process saw with an Agent so far; it is what tells an Agent that quit
-    /// from one that Herdr has not brought back yet. Returns whether anything
-    /// changed.
+    /// from one that Herdr has not brought back yet; `shell_started` gives
+    /// when the shell of a pane started: a shell older than the last sighting
+    /// of the Agent was there all along, so the Agent quit (a restart makes a
+    /// new shell). Returns whether anything changed.
     pub fn refresh(
         &mut self,
         snapshot: &Snapshot,
         config: &Config,
         alive: &mut HashSet<String>,
         now_ms: u64,
+        shell_started: &dyn Fn(&str) -> Option<u64>,
     ) -> bool {
         // Herdr is starting: nothing it reports can be trusted yet.
         if snapshot.panes.is_empty() {
@@ -126,6 +130,9 @@ impl LiveAgents {
             // No Agent in the pane: it quit in front of us, or Herdr has not
             // brought it back yet.
             if alive.remove(pane) {
+                return false;
+            }
+            if shell_started(pane).is_some_and(|started| started < record.since_ms) {
                 return false;
             }
             now_ms.saturating_sub(record.since_ms) < max_age_ms
@@ -189,7 +196,7 @@ mod tests {
     }
 
     fn refresh(live: &mut LiveAgents, snap: &Snapshot, alive: &mut HashSet<String>) -> bool {
-        live.refresh(snap, &Config::default(), alive, 1_000)
+        live.refresh(snap, &Config::default(), alive, 1_000, &|_| None)
     }
 
     #[test]
@@ -245,6 +252,30 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_older_than_the_last_sighting_means_the_agent_quit() {
+        let mut live = LiveAgents::default();
+        let mut alive = HashSet::new();
+        let running = snapshot(&["w1:p1"], vec![agent("w1:p1", "claude", Some("s"))]);
+        refresh(&mut live, &running, &mut alive);
+        let shell = snapshot(&["w1:p1"], vec![]);
+        let mut fresh = HashSet::new();
+        // Started after the last sighting (1_000): Herdr restarted, keep it.
+        assert!(
+            !live.refresh(&shell, &Config::default(), &mut fresh, 2_000, &|_| Some(
+                1_500
+            ))
+        );
+        assert_eq!(live.panes.len(), 1);
+        // Started before it: the pane was there all along, the agent quit.
+        assert!(
+            live.refresh(&shell, &Config::default(), &mut fresh, 2_000, &|_| Some(
+                500
+            ))
+        );
+        assert!(live.panes.is_empty());
+    }
+
+    #[test]
     fn a_gone_pane_or_a_sleeping_agent_drops_the_record() {
         let mut live = LiveAgents::default();
         let mut alive = HashSet::new();
@@ -276,7 +307,7 @@ mod tests {
         let shell = snapshot(&["w1:p1"], vec![]);
         let later = 1_000 + u64::try_from(MAX_AGE.as_millis()).unwrap() + 1;
         let mut fresh = HashSet::new();
-        assert!(live.refresh(&shell, &Config::default(), &mut fresh, later));
+        assert!(live.refresh(&shell, &Config::default(), &mut fresh, later, &|_| None));
         assert!(live.panes.is_empty());
     }
 

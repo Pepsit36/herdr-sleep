@@ -49,6 +49,11 @@ pub trait Env {
     fn claude_conversation_saved(&self, _session: &str) -> Option<bool> {
         None
     }
+    /// Wall-clock milliseconds since the Unix epoch at which the shell of
+    /// `pane` started, `None` when that cannot be told.
+    fn pane_shell_started_ms(&self, _pane: &str) -> Option<u64> {
+        None
+    }
     /// Type text into a pane without pressing Enter.
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()>;
     /// Press logical keys in a pane.
@@ -187,6 +192,11 @@ impl Env for LiveEnv {
         self.client
             .agent_start(name, kind, pane, timeout, args)
             .map_err(message)
+    }
+
+    fn pane_shell_started_ms(&self, pane: &str) -> Option<u64> {
+        let info = self.client.pane_process_info(pane).ok()?;
+        procs::started_ms(info.shell_pid, self.now_millis())
     }
 
     fn claude_conversation_saved(&self, session: &str) -> Option<bool> {

@@ -269,6 +269,17 @@ fn candidates(
             if pane.has_agent() || !config.is_managed(&record.kind) {
                 continue;
             }
+            // A shell older than the last sighting of the Agent was there all
+            // along: the user quit the Agent, Herdr did not restart.
+            if env
+                .pane_shell_started_ms(&pane.pane_id)
+                .is_some_and(|started| started < record.since_ms)
+            {
+                report
+                    .skipped
+                    .push((pane.pane_id.clone(), "agent-quit-before".into()));
+                continue;
+            }
             if !env.dir_exists(&record.cwd) {
                 report
                     .missing_cwd
@@ -831,6 +842,8 @@ mod tests {
         unknown_sleepers: Vec<String>,
         /// Sessions whose conversation Claude Code never saved.
         unsaved: Vec<String>,
+        /// When the shell of every pane started, as milliseconds since the epoch.
+        shell_started: Option<u64>,
         /// The Guards refuse the resumed agent.
         guard: Option<Refusal>,
         /// Saved session panes whose agent was started again.
@@ -867,6 +880,7 @@ mod tests {
                 saved_name: Some("worker".into()),
                 unknown_sleepers: Vec::new(),
                 unsaved: Vec::new(),
+                shell_started: None,
                 guard: None,
                 live: RefCell::new(BTreeMap::new()),
                 quit: RefCell::new(Default::default()),
@@ -1102,6 +1116,10 @@ mod tests {
                 return Err("invalid_agent_name".into());
             }
             Ok(())
+        }
+
+        fn pane_shell_started_ms(&self, _: &str) -> Option<u64> {
+            self.shell_started
         }
 
         fn claude_conversation_saved(&self, session: &str) -> Option<bool> {
@@ -1799,6 +1817,24 @@ mod tests {
             "{:?}",
             fake.journal()
         );
+    }
+
+    #[test]
+    fn a_record_older_than_the_shell_is_resumed_and_a_newer_one_is_not() {
+        for (started, restored) in [(Some(10_000), true), (Some(0), false), (None, true)] {
+            let mut fake = Fake::new("record-age").pane(
+                "w1-2",
+                Spec {
+                    no_session: true,
+                    ..Spec::saved("/proj")
+                },
+            );
+            fake.shell_started = started;
+            record(&fake, "w1-2", "sess-rec", Some("n")); // seen at 1 ms
+            fake.shell_started = started.map(|s| if s == 0 { 0 } else { s });
+            let report = run(&fake);
+            assert_eq!(report.restored.len() == 1, restored, "{started:?}");
+        }
     }
 
     #[test]
