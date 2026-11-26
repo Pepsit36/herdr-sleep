@@ -518,7 +518,7 @@ mod tests {
         fn enters(&self) -> Vec<String> {
             self.calls()
                 .into_iter()
-                .filter(|c| c.starts_with("keys"))
+                .filter(|c| c.starts_with("wake"))
                 .collect()
         }
 
@@ -655,12 +655,9 @@ mod tests {
             unreachable!()
         }
 
-        fn send_text(&self, _: &str, _: &str) -> EnvResult<()> {
-            unreachable!()
-        }
-
-        fn send_keys(&self, pane: &str, keys: &[&str]) -> EnvResult<()> {
-            self.log(format!("keys {pane} {}", keys.join(" ")));
+        fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
+            assert_eq!(text, crate::ops::wake::WAKE_SIGNAL);
+            self.log(format!("wake {pane}"));
             if self.keys_error {
                 return Err("pane gone".into());
             }
@@ -668,6 +665,10 @@ mod tests {
                 self.enter_at.set(Some(self.clock()));
             }
             Ok(())
+        }
+
+        fn send_keys(&self, _: &str, _: &[&str]) -> EnvResult<()> {
+            unreachable!()
         }
 
         fn run(&self, _: &str, _: &[&str]) -> EnvResult<()> {
@@ -751,7 +752,7 @@ mod tests {
         let fake = Fake::new("pane");
         let outcome = handle(&fake, &event("pane.focused", r#"{"pane_id":"w1:p2"}"#));
         assert_eq!(outcome, woke("w1:p2"));
-        assert_eq!(fake.enters(), ["keys w1:p2 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p2"]);
         assert_eq!(fake.events(), ["WAKE", "FOCUS-WAKE"]);
         assert!(fake.journal().contains("FOCUS-WAKE w1:p2 pane.focused"));
     }
@@ -779,7 +780,7 @@ mod tests {
         let fake = Fake::new("tab");
         let outcome = handle(&fake, &event("tab.focused", r#"{"tab_id":"w1:t2"}"#));
         assert_eq!(outcome, woke("w1:p4"));
-        assert_eq!(fake.enters(), ["keys w1:p4 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p4"]);
     }
 
     #[test]
@@ -790,7 +791,7 @@ mod tests {
             &event("tab.focused", r#"{"data":{"tab_id":"w1:t1"}}"#),
         );
         assert_eq!(outcome, woke("w1:p1"));
-        assert_eq!(fake.enters(), ["keys w1:p1 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p1"]);
     }
 
     #[test]
@@ -801,7 +802,7 @@ mod tests {
             &event("workspace.focused", r#"{"workspace_id":"w1"}"#),
         );
         assert_eq!(outcome, woke("w1:p1"));
-        assert_eq!(fake.enters(), ["keys w1:p1 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p1"]);
     }
 
     #[test]
@@ -815,7 +816,7 @@ mod tests {
             ),
         ]));
         assert_eq!(handle(&fake, &event), woke("w1:p3"));
-        assert_eq!(fake.enters(), ["keys w1:p3 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p3"]);
     }
 
     #[test]
@@ -843,7 +844,7 @@ mod tests {
         // The twin ran alongside the first one, 5 s after its Enter.
         fake.elapsed.set(Duration::from_secs(5));
         assert_eq!(handle(&fake, &tab), EventOutcome::Ignored);
-        assert_eq!(fake.enters(), ["keys w1:p2 enter"]);
+        assert_eq!(fake.enters(), ["wake w1:p2"]);
         assert_eq!(fake.events(), ["WAKE", "FOCUS-WAKE", "WARN"]);
     }
 
@@ -893,6 +894,6 @@ mod tests {
         let outcome = handle(&fake, &event("pane.focused", r#"{"pane_id":"w1:p1"}"#));
         assert!(matches!(outcome, EventOutcome::Failed(_)));
         assert_eq!(fake.events(), ["WAKE", "WARN"]);
-        assert!(fake.journal().contains("cannot press Enter"));
+        assert!(fake.journal().contains("cannot wake the placeholder"));
     }
 }

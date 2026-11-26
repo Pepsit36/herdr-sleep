@@ -53,5 +53,9 @@ fn main() -> ExitCode {
     reporter.declare();
     let captured = tty::capture(raw.is_some());
     reporter.release();
+    // The terminal went away without a key: there is nobody to wake it for.
+    let Some(captured) = captured else {
+        return ExitCode::from(1);
+    };
     handoff::run(&args, raw, &captured)
 }

@@ -12,11 +12,43 @@ pub fn clean(text: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\x1b' => match chars.next() {
+                // Alt with an arrow is `ESC ESC [ A`: the first ESC stands
+                // alone, the rest is parsed as the sequence it is.
+                Some('\x1b') => {
+                    if chars.peek().is_some() {
+                        // Put the second ESC back by parsing it again below.
+                        let rest: String = std::iter::once('\x1b').chain(chars.by_ref()).collect();
+                        out.push_str(&clean(&rest));
+                        return out;
+                    }
+                }
                 Some('[') => {
                     // Parameter and intermediate bytes, then one final byte.
+                    let mut params = String::new();
+                    let mut final_byte = None;
                     while let Some(&n) = chars.peek() {
                         chars.next();
                         if ('\x40'..='\x7e').contains(&n) {
+                            final_byte = Some(n);
+                            break;
+                        }
+                        params.push(n);
+                    }
+                    // X10 mouse report: `ESC [ M` then three payload bytes.
+                    if final_byte == Some('M') && params.is_empty() {
+                        for _ in 0..3 {
+                            chars.next();
+                        }
+                    }
+                }
+                // DCS, SOS, PM and APC strings run until ST (ESC \) or BEL.
+                Some('P' | 'X' | '^' | '_') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            chars.next();
                             break;
                         }
                     }
@@ -53,11 +85,30 @@ pub fn clean(text: &str) -> String {
     out
 }
 
+/// What the user typed in the Placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Captured {
+    /// The text to replay, trailing whitespace removed.
+    pub text: String,
+    /// The user ended it with Enter, so the Replay presses Enter too. Without
+    /// it the text is left in the prompt for the user to finish.
+    pub submitted: bool,
+}
+
+/// The text a user typed and whether they pressed Enter after it.
+pub fn captured(bytes: &[u8]) -> Captured {
+    let cleaned = clean(&String::from_utf8_lossy(bytes));
+    let submitted = cleaned.trim_end_matches([' ', '\t']).ends_with('\n');
+    Captured {
+        text: cleaned.trim_end().to_string(),
+        submitted,
+    }
+}
+
 /// The text a user typed, as it should be replayed to the agent.
+#[cfg(test)]
 pub fn printable(bytes: &[u8]) -> String {
-    clean(&String::from_utf8_lossy(bytes))
-        .trim_end()
-        .to_string()
+    captured(bytes).text
 }
 
 #[cfg(test)]
@@ -120,6 +171,27 @@ mod tests {
     #[test]
     fn colours_are_stripped_but_newlines_stay() {
         assert_eq!(clean("\x1b[31mred\x1b[0m\nnext\r\n"), "red\nnext\n");
+    }
+
+    #[test]
+    fn enter_at_the_end_means_submitted() {
+        assert!(captured(b"fix the build\r").submitted);
+        assert!(captured(b"line one\r\nline two\r").submitted);
+        assert!(!captured(b"fix the").submitted);
+        assert!(!captured(b"fix\r then more").submitted);
+        assert!(!captured(b"\x03").submitted);
+        // Enter alone is a wake, with nothing to type.
+        let alone = captured(b"\r");
+        assert!(alone.submitted && alone.text.is_empty());
+        assert_eq!(captured(b"hi  \r").text, "hi");
+    }
+
+    #[test]
+    fn alt_arrow_and_mouse_and_device_strings_leave_no_text() {
+        assert_eq!(printable(b"\x1b\x1b[Aok"), "ok");
+        assert_eq!(printable(b"a\x1b[M #!b"), "ab");
+        assert_eq!(printable(b"x\x1bPq1;2\x1b\\y"), "xy");
+        assert_eq!(printable(b"x\x1b_Gf=100;\x1b\\y"), "xy");
     }
 
     #[test]

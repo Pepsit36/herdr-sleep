@@ -14,6 +14,27 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-26
+
+<!-- stamped -->
+
+### Fixed
+
+- **Wake:** text you type in the placeholder is submitted to the agent only if you pressed Enter
+  after it. It used to be submitted always, so a half typed line, or a key pressed to wake the
+  pane, reached the agent as a prompt. Without Enter the text waits in the prompt for you to finish.
+- **Wake:** waking by focus no longer presses Enter in the pane: that key landed in the text you
+  were typing, or in a startup dialog of the agent. It now sends a terminal focus report, which the
+  placeholder ignores as text.
+- **Wake:** a replay that fails (a typing error, a broken configuration) is written in the journal
+  and keeps the typed text and your draft on disk instead of deleting them first. A configuration
+  that does not load no longer stops the replay.
+- **Wake:** the placeholder no longer lets Alt with an arrow, mouse reports or device strings
+  leave stray characters in the text, does not take a closed terminal for a wake, and gives up
+  on a `herdr` call that does not answer after ten seconds instead of waiting for it forever.
+- **Wake:** the three focus hooks of a tab, a workspace and a pane no longer wake the pane
+  together, and a failed wake no longer blocks the next focus for fifteen seconds.
+
 ## [0.7.1] - 2026-11-26
 
 <!-- stamped -->

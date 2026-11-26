@@ -44,6 +44,13 @@ pub enum ReplayOutcome {
     Failed(String),
 }
 
+/// A Replay that could not be carried out: the journal is the only place a
+/// detached process can say so.
+fn failed(journal: &Journal, pane: &str, reason: String) -> ReplayOutcome {
+    journal.log("WARN", &format!("{pane}: replay failed: {reason}"));
+    ReplayOutcome::Failed(reason)
+}
+
 /// Wait for the Agent to be Ready, then type the Captured input into it.
 pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcome {
     // The Placeholder's state directory (where the replay file is) is the one
@@ -67,12 +74,21 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
     let journal = Journal::new(&state_dir);
     let pane = args.pane.as_str();
 
-    let text = match std::fs::read_to_string(&args.file) {
+    let raw = match std::fs::read_to_string(&args.file) {
         Ok(text) => text,
         Err(error) => {
-            return ReplayOutcome::Failed(format!("cannot read {}: {error}", args.file.display()));
+            return failed(
+                &journal,
+                pane,
+                format!("cannot read {}: {error}", args.file.display()),
+            );
         }
     };
+    // The Placeholder ends the file with a newline when the user pressed
+    // Enter after the text: only then is Enter pressed here, otherwise the
+    // text stays in the prompt, like a draft.
+    let submitted = raw.ends_with('\n');
+    let text = raw.trim_end_matches('\n').to_string();
 
     if await_ready(env, config, pane, &args.kind).is_none() {
         journal.log(
@@ -83,37 +99,45 @@ pub fn replay(env: &dyn Env, config: &Config, args: &ReplayArgs) -> ReplayOutcom
     }
     restore_name(env, &journal, pane, args.name.as_deref());
     forget(&journal, &state_dir, pane);
-    // The pane no longer sleeps: its tab must lose the sleep prefix now, not
-    // at the next sleep somewhere.
     sync_markers(env, config);
 
+    let bytes = text.len();
+    if bytes > 0 {
+        // The file goes only once the text is typed: a failure keeps it.
+        if let Err(error) = env.send_text(pane, &text) {
+            return failed(&journal, pane, format!("cannot type the text: {error}"));
+        }
+        if submitted {
+            env.sleep(ENTER_DELAY);
+            if let Err(error) = env.send_keys(pane, &["enter"]) {
+                return failed(&journal, pane, format!("cannot press Enter: {error}"));
+            }
+        }
+    }
     if let Err(error) = std::fs::remove_file(&args.file) {
         journal.log(
             "WARN",
             &format!("{pane}: cannot delete the replay file: {error}"),
         );
     }
-    let bytes = text.len();
-    if bytes > 0 {
-        if let Err(error) = env.send_text(pane, &text) {
-            return ReplayOutcome::Failed(format!("cannot type the text: {error}"));
-        }
-        env.sleep(ENTER_DELAY);
-        if let Err(error) = env.send_keys(pane, &["enter"]) {
-            return ReplayOutcome::Failed(format!("cannot press Enter: {error}"));
-        }
-    }
     // The draft saved at Sleep comes back last, after what was typed in the
-    // Placeholder, and is never submitted.
+    // Placeholder, and is never submitted. Its file goes once it is typed.
     let draft_file = super::sleep::draft_path(&state_dir, pane);
     if let Ok(draft) = std::fs::read_to_string(&draft_file) {
-        let _ = std::fs::remove_file(&draft_file);
         if !draft.is_empty() {
             if let Err(error) = env.send_text(pane, &draft) {
-                return ReplayOutcome::Failed(format!("cannot type the draft back: {error}"));
+                return failed(
+                    &journal,
+                    pane,
+                    format!(
+                        "cannot type the draft back (kept in {}): {error}",
+                        draft_file.display()
+                    ),
+                );
             }
             journal.log("DRAFT", &format!("{pane} restored bytes={}", draft.len()));
         }
+        let _ = std::fs::remove_file(&draft_file);
     }
     journal.log("REPLAY", &format!("{pane} bytes={bytes}"));
     ReplayOutcome::Replayed { bytes }
@@ -128,7 +152,8 @@ mod tests {
         let fake = Fake::new(name);
         std::fs::create_dir_all(&fake.state_dir).unwrap();
         let file = fake.state_dir.join("replay-w1_p2.txt");
-        std::fs::write(&file, text).unwrap();
+        // As the Placeholder writes it: a final newline means Enter was pressed.
+        std::fs::write(&file, format!("{text}\n")).unwrap();
         // The Placeholder starts the Replay at the moment it launches the Agent.
         fake.enter_at.set(Some(Duration::ZERO));
         let args = ReplayArgs {
@@ -246,6 +271,48 @@ mod tests {
     }
 
     #[test]
+    fn text_the_user_did_not_submit_stays_in_the_prompt() {
+        let (fake, args) = setup("unsubmitted", "fix the");
+        // No final newline: Enter was never pressed in the Placeholder.
+        std::fs::write(&args.file, "fix the").unwrap();
+        assert_eq!(
+            replay(&fake, &Config::default(), &args),
+            ReplayOutcome::Replayed { bytes: 7 }
+        );
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&"text w1:p2 fix the".to_string()),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.starts_with("keys")), "{calls:?}");
+        assert!(!args.file.exists());
+    }
+
+    #[test]
+    fn a_failed_typing_keeps_the_text_and_says_so_in_the_journal() {
+        let (mut fake, args) = setup("typing-fails", "hello");
+        fake.text_fails = true;
+        let outcome = replay(&fake, &Config::default(), &args);
+        assert!(matches!(outcome, ReplayOutcome::Failed(_)), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&args.file).unwrap(), "hello\n");
+        assert!(
+            fake.journal()
+                .contains("WARN w1:p2: replay failed: cannot type the text")
+        );
+    }
+
+    #[test]
+    fn a_draft_that_cannot_be_typed_back_stays_on_disk() {
+        let (mut fake, args) = setup("draft-fails", "");
+        let draft = super::super::sleep::draft_path(&fake.state_dir, "w1:p2");
+        std::fs::write(&draft, "half a thought").unwrap();
+        fake.text_fails = true;
+        let outcome = replay(&fake, &Config::default(), &args);
+        assert!(matches!(outcome, ReplayOutcome::Failed(_)), "{outcome:?}");
+        assert!(draft.exists());
+    }
+
+    #[test]
     fn the_typed_text_is_never_journaled() {
         let (fake, args) = setup("secret", "hunter2 my password");
         replay(&fake, &Config::default(), &args);
@@ -259,7 +326,7 @@ mod tests {
         fake.prompt_after = None;
         let outcome = replay(&fake, &Config::default(), &args);
         assert_eq!(outcome, ReplayOutcome::TimedOut);
-        assert_eq!(std::fs::read_to_string(&args.file).unwrap(), "hello");
+        assert_eq!(std::fs::read_to_string(&args.file).unwrap(), "hello\n");
         assert!(!fake.calls().iter().any(|c| c.starts_with("text")));
         assert!(!fake.calls().iter().any(|c| c.starts_with("keys")));
         assert_eq!(fake.events(), ["REPLAY-TIMEOUT"]);

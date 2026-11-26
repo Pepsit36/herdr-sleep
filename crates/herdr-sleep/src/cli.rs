@@ -551,11 +551,20 @@ pub fn wake_exit_code(outcome: &WakeOutcome) -> ExitCode {
 /// Run `herdr-sleep replay --pane P [--name N] --kind K --file F`, started by
 /// the Placeholder. Silent: the journal holds the outcome.
 pub fn replay_command(args: &ReplayArgs) -> ExitCode {
-    let config = match Config::load() {
-        Ok(config) => config,
-        Err(error) => return fail(error),
-    };
     let env = LiveEnv::new(HerdrClient::from_env());
+    // The text the user typed is replayed whatever the configuration says: a
+    // typo in it must not lose it. The defaults are harmless here, a Replay
+    // only types into an Agent that just woke.
+    let config = Config::load().unwrap_or_else(|error| {
+        if let Some(dir) = herdr_sleep::ops::Env::state_dir(&env) {
+            let _ = std::fs::create_dir_all(&dir);
+            herdr_sleep::journal::Journal::new(&dir).log(
+                "WARN",
+                &format!("replay: {error}; using the default configuration"),
+            );
+        }
+        Config::default()
+    });
     match replay(&env, &config, args) {
         ReplayOutcome::Replayed { .. } => ExitCode::SUCCESS,
         ReplayOutcome::TimedOut => ExitCode::from(1),

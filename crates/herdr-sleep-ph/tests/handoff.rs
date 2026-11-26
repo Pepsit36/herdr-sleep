@@ -256,7 +256,8 @@ fn declares_shows_replays_and_hands_over() {
     );
 
     let replay = h.path("state/replay-1-2.txt");
-    assert_eq!(fs::read_to_string(&replay).unwrap(), "hello");
+    // Enter was pressed: the file ends with a newline.
+    assert_eq!(fs::read_to_string(&replay).unwrap(), "hello\n");
     wait_for("the replay process", || h.path("main.out").exists());
     wait_for("the replay process output", || {
         fs::read_to_string(h.path("main.out")).is_ok_and(|s| !s.is_empty())
@@ -299,6 +300,19 @@ fn declares_shows_replays_and_hands_over() {
         .map(|l| seq_of(l))
         .collect();
     assert!(in_order.windows(2).all(|w| w[0] < w[1]), "{in_order:?}");
+}
+
+#[test]
+fn text_without_enter_is_not_marked_as_submitted() {
+    let mut h = Harness::start("noenter");
+    h.expect_screen("is asleep");
+    h.type_bytes(b"fix the");
+    h.shell_record();
+    wait_for("the replay to start", || h.path("main.out").exists());
+    assert_eq!(
+        fs::read_to_string(h.path("state/replay-1-2.txt")).unwrap(),
+        "fix the"
+    );
 }
 
 #[test]

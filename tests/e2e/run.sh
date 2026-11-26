@@ -663,6 +663,17 @@ s20_a_quit_agent_is_not_restored() {
   if no_agent "$second" && ! grep -q "RESTORE-RESUME $second" "$STATE_DIR/herdr-sleep.log"; then ok "gamma, quit before the restart, stays a shell"; else bad "gamma was brought back (kind=$(agent_kind "$second"))"; fi
 }
 
+s21_unsubmitted_text_stays_in_the_prompt() {
+  new_world "$CONFIG_MANUAL" || return
+  sleep_alpha || return
+  # No Enter: the user did not submit this, the agent must not receive it as a prompt.
+  herdr pane send-text "$PANE_A" "half typed" >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "the agent is back as claude"; else bad "no wake: kind=$(agent_kind "$PANE_A")"; return; fi
+  if wait_for 30 screen_has "$PANE_A" "half typed"; then ok "the text is in the prompt"; else bad "the text never reached the prompt"; fi
+  sleep 2
+  if screen_has "$PANE_A" "got: half typed"; then bad "the text was submitted without Enter"; else ok "the text was not submitted"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -684,6 +695,7 @@ SCENARIOS=(
   "s18|a woken pane loses its marker|s18_woken_pane_loses_its_marker"
   "s19|overlapping sleeps type once|s19_overlapping_sleeps"
   "s20|an agent the user quit is not restored|s20_a_quit_agent_is_not_restored"
+  "s21|unsubmitted text stays in the prompt|s21_unsubmitted_text_stays_in_the_prompt"
 )
 
 # ---------------------------------------------------------------------------

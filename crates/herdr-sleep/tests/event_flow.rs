@@ -58,7 +58,7 @@ case "$1 $2" in
     if [ -e "$D/enter" ]; then F="$D/agent-awake.json"
     else F="$D/agent-sleeping.json"; fi
     sed "s/\"pane_id\":\"wC:p1\"/\"pane_id\":\"$3\"/" "$F" ;;
-  "pane send-keys") touch "$D/enter"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
+  "pane send-text") touch "$D/enter"; echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
   *) echo '{{"id":"x","result":{{"type":"ok"}}}}' ;;
 esac
 "#,
@@ -111,7 +111,7 @@ fn presses(sandbox: &Sandbox) -> Vec<String> {
     sandbox
         .calls()
         .into_iter()
-        .filter(|c| c.contains("send-keys"))
+        .filter(|c| c.contains("send-text"))
         .collect()
 }
 
@@ -121,7 +121,7 @@ fn a_pane_focus_wakes_that_pane() {
     let output = sandbox.event("pane.focused", r#"{"pane_id":"wC:p1","workspace_id":"wC"}"#);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(output.stdout.is_empty());
-    assert_eq!(presses(&sandbox), ["pane send-keys wC:p1 enter"]);
+    assert_eq!(presses(&sandbox), ["pane send-text wC:p1 \u{1b}[I"]);
     let journal = fs::read_to_string(sandbox.path("state/herdr-sleep.log")).unwrap();
     assert!(
         journal.contains("FOCUS-WAKE wC:p1 pane.focused"),
@@ -134,7 +134,7 @@ fn a_tab_focus_wakes_the_focused_pane_only() {
     let sandbox = Sandbox::new("tab");
     let output = sandbox.event("tab.focused", r#"{"data":{"tab_id":"wC:t1"}}"#);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(presses(&sandbox), ["pane send-keys wC:p2 enter"]);
+    assert_eq!(presses(&sandbox), ["pane send-text wC:p2 \u{1b}[I"]);
 }
 
 #[test]
