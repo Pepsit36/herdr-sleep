@@ -366,14 +366,13 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         return Err(Refusal::RemoteControl);
     }
 
-    if let Some(environment) = ctx.probe.environment(pid) {
-        if let Some(var) = config
+    if let Some(environment) = ctx.probe.environment(pid)
+        && let Some(var) = config
             .protect_env_vars
             .iter()
             .find(|var| environment.iter().any(|(key, _)| key == *var))
-        {
-            return Err(Refusal::ProtectedEnv(var.clone()));
-        }
+    {
+        return Err(Refusal::ProtectedEnv(var.clone()));
     }
 
     let busy: Vec<&str> = ctx
@@ -488,10 +487,10 @@ fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
     if let Some(name) = name.filter(|n| config.name_excluded(n)) {
         return Err(Refusal::NameExcluded(name.to_string()));
     }
-    if let Some(cwd) = agent.effective_cwd() {
-        if config.cwd_excluded(cwd) {
-            return Err(Refusal::CwdExcluded(cwd.to_string()));
-        }
+    if let Some(cwd) = agent.effective_cwd()
+        && config.cwd_excluded(cwd)
+    {
+        return Err(Refusal::CwdExcluded(cwd.to_string()));
     }
     Ok(())
 }

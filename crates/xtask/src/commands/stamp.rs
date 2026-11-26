@@ -90,13 +90,13 @@ fn describe(plan: &Plan, tags: &Tags, version: Version) {
             plan.base
         );
     }
-    if let Some(owned) = plan.owned {
-        if owned.version != version {
-            println!(
-                "Correcting the section this branch already stamped: {} becomes {version}.",
-                owned.version
-            );
-        }
+    if let Some(owned) = plan.owned
+        && owned.version != version
+    {
+        println!(
+            "Correcting the section this branch already stamped: {} becomes {version}.",
+            owned.version
+        );
     }
 }
 

@@ -293,10 +293,10 @@ fn repair_verdict(changelog: &Changelog, diff: &Diff, tags: &Tags) -> u8 {
     if untagged.len() != 1 || untagged[0].version != expected {
         return repair_failure(Some(expected), &untagged);
     }
-    if let Some(first) = changelog.headings().first() {
-        if first.version != expected {
-            return repair_position_failure(expected, first.version);
-        }
+    if let Some(first) = changelog.headings().first()
+        && first.version != expected
+    {
+        return repair_position_failure(expected, first.version);
     }
     if diff.reordered {
         return reorder_failure();
