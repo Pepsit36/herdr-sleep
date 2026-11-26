@@ -14,6 +14,28 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sleep:** an agent started in a nested shell (`nix develop`, `sudo -i`, `bash`) or with `exec`
+  stays awake and the refusal is `not-shell-job`. It used to be quit, the sleep was abandoned after
+  twenty seconds and the keys typed to undo it landed in the nested shell, leaving a bare pane
+  with no Placeholder.
+- **Sleep:** the pane is written in `sleepers.json` just before the exit command is typed, and the
+  entry is withdrawn when the agent is still running after an abandoned sleep. An agent that
+  quits late, after the abandon, no longer leaves a bare shell that nothing restores. The session
+  is now in the `SLEEP` journal line.
+- **Sweep:** a sleep that is abandoned is not tried again at every pass: the agent is left alone
+  for five minutes, then ten, up to an hour, until its state changes (`sweep --now` still tries).
+  A dry run and a refused agent no longer use up the three places of a pass, so the agents behind
+  them are no longer left out forever.
+- **Wake:** a registry entry whose pane runs an agent again, or whose resume failed a few minutes
+  after a wake, is dropped by the Sweep. A restart used to put the Placeholder back for a session
+  that was already running or dead.
+- **Restart:** two `restore` runs at once no longer type the Placeholder command twice in a pane
+  (the second one ends at once), and a second `restore` leaves the panes that already sleep alone
+  instead of listing them as skipped. A pane Herdr holds only as a Saved session is resumed with
+  that session, not an older one from the registry.
+
 ## [0.7.2] - 2026-11-26
 
 <!-- stamped -->
