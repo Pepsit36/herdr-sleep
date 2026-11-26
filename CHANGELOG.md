@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-26
+
+<!-- stamped -->
+
 ### Changed
 
 - **Action:** "Sleep idle agents now" runs `herdr-sleep sweep --now`, as its title says: every
