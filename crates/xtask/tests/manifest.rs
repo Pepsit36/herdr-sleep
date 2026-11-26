@@ -145,6 +145,7 @@ const TOOLS: &[&str] = &[
     "gzip",
     "sha256sum",
     "shasum",
+    "git",
 ];
 
 fn find_tool(name: &str) -> Option<PathBuf> {
@@ -277,13 +278,18 @@ impl Sandbox {
 
     /// Publish a fake release `version` whose archive holds the two binaries.
     fn publish(&self, version: &str, good_checksum: bool) {
+        self.publish_binaries(version, good_checksum, "#!/bin/sh\necho release\n");
+    }
+
+    /// [`Sandbox::publish`] with the text of the two binaries given.
+    fn publish_binaries(&self, version: &str, good_checksum: bool, binary: &str) {
         let (os, arch) = os_arch();
         let dir = self.releases.join(format!("v{version}"));
         fs::create_dir_all(&dir).unwrap();
         let stage = self.root.join("stage");
         fs::create_dir_all(&stage).unwrap();
         for b in ["herdr-sleep", "herdr-sleep-ph"] {
-            write_executable(&stage.join(b), "#!/bin/sh\necho release\n");
+            write_executable(&stage.join(b), binary);
         }
         let name = format!("herdr-sleep-{version}-{os}-{arch}.tar.gz");
         let archive = dir.join(&name);
@@ -328,6 +334,27 @@ impl Sandbox {
             String::from_utf8_lossy(&out.stdout).into_owned(),
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
+    }
+
+    /// Run `git` in the repository skeleton.
+    fn git(&self, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+            .args(args)
+            .current_dir(&self.repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Make the skeleton a repository whose only commit has `subject`.
+    fn commit_all(&self, subject: &str) {
+        if !self.repo.join(".git").exists() {
+            self.git(&["init", "-q"]);
+        }
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "--allow-empty", "-m", subject]);
     }
 
     fn bin(&self, name: &str) -> String {
@@ -392,6 +419,74 @@ fn build_falls_back_when_the_release_is_missing() {
     assert!(sb.downloaded());
     assert_eq!(sb.cargo_calls().trim(), "build --release --locked");
     assert!(sb.bin("herdr-sleep").contains("source"));
+}
+
+#[test]
+fn build_falls_back_on_a_binary_that_does_not_run() {
+    let Some(sb) = Sandbox::new("1.2.3", true) else {
+        return;
+    };
+    sb.publish_binaries("1.2.3", true, "#!/bin/sh\nexit 1\n");
+    let (code, out, err) = sb.run();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("does not run on this machine"), "{out}");
+    assert!(sb.bin("herdr-sleep").contains("source"));
+    assert!(sb.bin("herdr-sleep-ph").contains("source"));
+}
+
+#[test]
+fn build_of_the_release_commit_installs_the_release() {
+    let Some(sb) = Sandbox::new("1.2.3", true) else {
+        return;
+    };
+    if find_tool("git").is_none() {
+        return;
+    }
+    sb.publish("1.2.3", true);
+    sb.commit_all("chore(release): 1.2.3 [skip ci]");
+    let (code, out, err) = sb.run();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(sb.bin("herdr-sleep").contains("release"));
+}
+
+#[test]
+fn build_of_a_checkout_ahead_of_its_release_builds_from_source() {
+    let Some(sb) = Sandbox::new("1.2.3", true) else {
+        return;
+    };
+    if find_tool("git").is_none() {
+        return;
+    }
+    sb.publish("1.2.3", true);
+    sb.commit_all("chore(release): 1.2.3 [skip ci]");
+    sb.git(&["tag", "v1.2.3"]);
+    fs::create_dir_all(sb.repo.join("crates")).unwrap();
+    fs::write(sb.repo.join("crates/code.rs"), "fn changed() {}\n").unwrap();
+    sb.commit_all("fix: change the code");
+    let (code, out, err) = sb.run();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("is not the code of release 1.2.3"), "{out}");
+    assert!(!sb.downloaded());
+    assert!(sb.bin("herdr-sleep").contains("source"));
+}
+
+#[test]
+fn build_of_a_checkout_ahead_by_docs_only_installs_the_release() {
+    let Some(sb) = Sandbox::new("1.2.3", true) else {
+        return;
+    };
+    if find_tool("git").is_none() {
+        return;
+    }
+    sb.publish("1.2.3", true);
+    sb.commit_all("chore(release): 1.2.3 [skip ci]");
+    sb.git(&["tag", "v1.2.3"]);
+    fs::write(sb.repo.join("README.md"), "docs\n").unwrap();
+    sb.commit_all("docs: reword the readme");
+    let (code, out, err) = sb.run();
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(sb.bin("herdr-sleep").contains("release"));
+    assert!(sb.cargo_calls().is_empty());
 }
 
 #[test]

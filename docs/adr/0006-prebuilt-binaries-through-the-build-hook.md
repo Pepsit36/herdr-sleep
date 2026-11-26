@@ -11,3 +11,8 @@ date: 2026-11-07
 
 - The GitHub repository is a push mirror of the GitLab source of truth and must carry the tags, since the script resolves assets by tag.
 - macOS binaries are neither signed nor notarised; they are command-line tools launched from a terminal, which Gatekeeper does not block.
+- The script downloads only when the checkout is the code of the release the manifest names: the
+  head is the `chore(release)` commit of that version, or no file the binaries come from changed
+  since its tag. A checkout ahead of its release, a branch or a fork is built from source, and so is
+  one whose downloaded binaries do not run on the machine. Without git there is nothing to compare
+  and the manifest is trusted.

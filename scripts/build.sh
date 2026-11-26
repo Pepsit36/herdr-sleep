@@ -39,9 +39,9 @@ manifest_version() {
 
 fetch() { # url -> stdout
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$1"
+        curl -fsSL --connect-timeout 15 --max-time 300 --retry 2 "$1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "$1"
+        wget -qO- -T 30 -t 3 "$1"
     else
         echo "neither curl nor wget is installed" >&2
         return 1
@@ -57,6 +57,22 @@ sha256_of() { # file -> hex digest
         echo "neither sha256sum nor shasum is installed" >&2
         return 1
     fi
+}
+
+# Whether this checkout is the code of release $1, so that the binaries of that
+# release are the ones to install. The manifest carries the version of the last
+# release, but the checkout may be commits ahead of it (a merge whose release
+# commit is not there yet, a branch, a fork): its own binaries are then
+# different. Without git there is nothing to compare, and the manifest is trusted.
+tree_matches_release() {
+    command -v git >/dev/null 2>&1 || return 0
+    git rev-parse --git-dir >/dev/null 2>&1 || return 0
+    case $(git log -1 --format=%s 2>/dev/null) in
+        "chore(release): $1"*) return 0 ;;
+    esac
+    # Anything that does not change a binary (docs, CI) does not count.
+    git rev-parse -q --verify "refs/tags/v$1^{commit}" >/dev/null 2>&1 || return 1
+    git diff --quiet "v$1" HEAD -- crates Cargo.toml Cargo.lock
 }
 
 # Download, verify and install the release archive. Any failure returns 1.
@@ -99,6 +115,16 @@ install_release() {
             return 1
         fi
     done
+    # A binary that cannot run here (wrong format, a cross-build that did not
+    # survive) must not replace the source build the user would get otherwise.
+    for b in $BINARIES; do
+        found=$(find "$tmp/x" -type f -name "$b" | head -n 1)
+        chmod +x "$found"
+        if ! "$found" --version >/dev/null 2>&1; then
+            say "$b from the archive does not run on this machine"
+            return 1
+        fi
+    done
     for b in $BINARIES; do
         install_binary "$(find "$tmp/x" -type f -name "$b" | head -n 1)" "$b"
     done
@@ -130,6 +156,8 @@ if [ "${HERDR_SLEEP_FORCE_CARGO:-}" = 1 ]; then
     reason="HERDR_SLEEP_FORCE_CARGO is set"
 elif [ -z "$version" ] || [ "$version" = 0.0.0 ]; then
     reason="unreleased checkout"
+elif ! tree_matches_release "$version"; then
+    reason="this checkout is not the code of release $version"
 else
     if install_release "$version"; then
         exit 0
