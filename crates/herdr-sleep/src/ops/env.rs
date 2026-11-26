@@ -272,7 +272,7 @@ impl Env for LiveEnv {
     }
 
     fn main_bin(&self) -> PathBuf {
-        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("herdr-sleep"))
+        installed_path(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("herdr-sleep")))
     }
 
     fn herdr_bin(&self) -> PathBuf {
@@ -298,5 +298,33 @@ impl Env for LiveEnv {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+/// The path an executable is installed at. After an update replaced the file
+/// a process runs from, Linux reports its path with a ` (deleted)` suffix, and
+/// that path is typed into every Placeholder: the new file is the one to use.
+fn installed_path(exe: PathBuf) -> PathBuf {
+    let text = exe.to_string_lossy();
+    match text.strip_suffix(" (deleted)") {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_path_of_a_replaced_binary_loses_its_deleted_suffix() {
+        assert_eq!(
+            installed_path("/p/bin/herdr-sleep (deleted)".into()),
+            PathBuf::from("/p/bin/herdr-sleep")
+        );
+        assert_eq!(
+            installed_path("/p/bin/herdr-sleep".into()),
+            PathBuf::from("/p/bin/herdr-sleep")
+        );
     }
 }
