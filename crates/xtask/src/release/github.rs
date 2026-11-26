@@ -312,6 +312,11 @@ fn publish(
         .and_then(Json::as_u64)
         .ok_or_else(|| error("the release has no id"))?;
     let present = attached(&release);
+    // A resumed release rebuilt its archives, which are not reproducible: an
+    // asset of the same size is not the same file, and a checksum kept next to
+    // a replaced archive would fail for everyone who installs it.
+    let resumed = std::env::var(super::RESUME_VARIABLE).as_deref() == Ok("1");
+    let mut replaced: Vec<String> = Vec::new();
 
     for (name, path, size) in files {
         if !name
@@ -322,8 +327,13 @@ fn publish(
                 "refusing to upload '{name}': unexpected characters in the name"
             )));
         }
+        let with_its_archive = name
+            .strip_suffix(".sha256")
+            .is_some_and(|archive| replaced.iter().any(|done| done == archive));
         match present.iter().find(|(known, _, _)| known == name) {
-            Some((_, attached_size, _)) if attached_size == size => {
+            Some((_, attached_size, _))
+                if attached_size == size && !resumed && !with_its_archive =>
+            {
                 println!("publish-github: {name} is already attached");
                 continue;
             }
@@ -331,10 +341,11 @@ fn publish(
                 let url = github.repo_url(&format!("releases/assets/{asset_id}"));
                 let reply = github.request("DELETE", &url, None, None)?;
                 github.expect(&reply, &[204], &format!("replacing {name}"))?;
-                println!("publish-github: removed {name} attached with another size");
+                println!("publish-github: removed {name} to attach the one just built");
             }
             None => {}
         }
+        replaced.push(name.clone());
         let url = format!(
             "{}/repos/{}/releases/{id}/assets?name={name}",
             github.uploads, github.repository
