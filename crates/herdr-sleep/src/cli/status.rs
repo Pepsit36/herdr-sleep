@@ -330,6 +330,7 @@ mod tests {
             signature: signature(agent, false),
             since_ms: NOW - ago_s * 1000,
             skip: skip.map(str::to_string),
+            ..AgentClock::default()
         }
     }
 
@@ -423,6 +424,7 @@ mod tests {
                 signature: "idle:1:false".into(),
                 since_ms: NOW - 5000,
                 skip: None,
+                ..AgentClock::default()
             },
         );
         let mut infos = HashMap::new();

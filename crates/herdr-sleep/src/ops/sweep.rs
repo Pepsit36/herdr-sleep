@@ -21,18 +21,26 @@ use crate::herdr::{Agent, Snapshot};
 use crate::journal::Journal;
 
 use super::live_agents::{self, LiveAgents};
+use super::pane_lock::PaneLock;
 use super::registry::{self, Registry};
+use super::wake::wake_stamp_path;
 use super::{Env, SleepOutcome, sleep_agent, sync_markers};
 
 /// Most agents put to sleep in one pass. A sleep takes seconds, so the rest
 /// waits for the next pass instead of freezing the Watcher.
 pub const MAX_SLEEPS_PER_SWEEP: usize = 3;
 
+/// Wait before a Sleep that was abandoned is tried again, doubled by every
+/// failure in a row up to [`RETRY_CEILING_MS`]. An exit command that does not
+/// work would otherwise be typed into the agent at every pass.
+const RETRY_BASE_MS: u64 = 5 * 60_000;
+const RETRY_CEILING_MS: u64 = 60 * 60_000;
+
 /// Name of the clocks file inside the state directory.
 pub const STATE_FILE: &str = "sweep.json";
 
 /// The idle clock of one agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AgentClock {
     /// `status:state_change_seq:focused` when the clock was last restarted.
     pub signature: String,
@@ -41,6 +49,23 @@ pub struct AgentClock {
     /// Code of the refusal already logged for this agent, if any.
     #[serde(default)]
     pub skip: Option<String>,
+    /// Abandoned Sleeps in a row since the clock restarted.
+    #[serde(default)]
+    pub failures: u32,
+    /// Wall-clock milliseconds before which a Sweep does not try again.
+    #[serde(default)]
+    pub retry_after_ms: u64,
+}
+
+impl AgentClock {
+    /// Note an abandoned Sleep at `now` and push the next try away.
+    fn failed(&mut self, now: u64) {
+        self.failures = self.failures.saturating_add(1);
+        let wait = RETRY_BASE_MS
+            .saturating_mul(1 << self.failures.saturating_sub(1).min(8))
+            .min(RETRY_CEILING_MS);
+        self.retry_after_ms = now.saturating_add(wait);
+    }
 }
 
 /// The idle clocks of every tracked agent, keyed by pane id.
@@ -131,19 +156,76 @@ fn prune_registry(env: &dyn Env, snapshot: &Snapshot) {
         return;
     }
     let alive: HashSet<&str> = snapshot.panes.iter().map(|p| p.pane_id.as_str()).collect();
+    let journal = Journal::new(&dir);
     match Registry::prune(&dir, &alive) {
         Ok(gone) => {
             for pane in gone {
-                Journal::new(&dir).log("PRUNE", &format!("{pane} no longer exists"));
+                journal.log("PRUNE", &format!("{pane} no longer exists"));
             }
         }
         Err(error) => {
-            Journal::new(&dir).log(
+            journal.log(
                 "WARN",
                 &format!("cannot prune {}: {error}", registry::FILE_NAME),
             );
         }
     }
+    for (pane, reason) in stale_entries(env, &dir, snapshot) {
+        match Registry::remove(&dir, &pane) {
+            Ok(()) => journal.log("PRUNE", &format!("{pane} {reason}")),
+            Err(error) => journal.log(
+                "WARN",
+                &format!("cannot prune {}: {error}", registry::FILE_NAME),
+            ),
+        }
+    }
+}
+
+/// How long after a Wake its entry may still be waiting for the agent to be
+/// ready (the Wake itself gives up after two minutes).
+const WAKE_GRACE_MS: u64 = 5 * 60_000;
+
+/// The registered panes whose entry no longer describes a pane that sleeps,
+/// with why: a restart would otherwise put the Placeholder back for a session
+/// that is running again or whose resume failed.
+///
+/// A pane is left alone while a Sleep or a Wake holds it, and while it shows
+/// a Sleeping agent. One that runs an agent is stale. A bare shell is stale
+/// only when a Wake was asked for since the last Sleep (that stamp is removed
+/// when a Sleep starts) and that was a while ago: after a Herdr restart the
+/// shell is bare too, and the entry is what `restore` needs.
+fn stale_entries(env: &dyn Env, dir: &Path, snapshot: &Snapshot) -> Vec<(String, &'static str)> {
+    let registry = Registry::load(dir);
+    let now = env.now_millis();
+    let mut stale = Vec::new();
+    for pane in registry.panes.keys() {
+        let Some(info) = snapshot.pane(pane) else {
+            continue;
+        };
+        if info.is_sleeping() {
+            continue;
+        }
+        let busy = ["sleep", "wake"].into_iter().any(|purpose| {
+            !matches!(
+                PaneLock::try_acquire_for(dir, pane, purpose),
+                Ok(Some(_)) | Err(_)
+            )
+        });
+        if busy {
+            continue;
+        }
+        if info.has_agent() {
+            stale.push((pane.clone(), "runs an agent again"));
+            continue;
+        }
+        let woken_at = fs::read_to_string(wake_stamp_path(dir, pane))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok());
+        if woken_at.is_some_and(|at| now.saturating_sub(at) >= WAKE_GRACE_MS) {
+            stale.push((pane.clone(), "was woken and is not asleep any more"));
+        }
+    }
+    stale
 }
 
 /// Refresh the record of live Agents that `restore` falls back on.
@@ -225,11 +307,15 @@ fn sweep_pass(
                 signature,
                 since_ms: now,
                 skip: None,
+                failures: 0,
+                retry_after_ms: 0,
             },
         };
         let eligible = !focused
             && config.allows_status(agent.agent_status)
-            && (immediate || now.saturating_sub(clock.since_ms) >= sleep_after_ms);
+            && (immediate
+                || (now.saturating_sub(clock.since_ms) >= sleep_after_ms
+                    && now >= clock.retry_after_ms));
         if eligible {
             due.push(agent);
         }
@@ -257,10 +343,19 @@ fn sweep_pass(
                 clocks.remove(&pane);
                 report.slept.push(pane);
             }
-            SleepOutcome::DryRun => report.dry_run.push(pane),
-            SleepOutcome::Aborted(reason) | SleepOutcome::Warned(reason) => {
+            // Instant and harmless: it must not use up the places of the agents
+            // behind it.
+            SleepOutcome::DryRun => {
+                report.dry_run.push(pane);
+                continue;
+            }
+            SleepOutcome::Aborted(reason) => {
+                if let Some(clock) = clocks.get_mut(&pane) {
+                    clock.failed(now);
+                }
                 report.aborted.push((pane, reason));
             }
+            SleepOutcome::Warned(reason) => report.aborted.push((pane, reason)),
         }
         attempts += 1;
     }
@@ -284,6 +379,7 @@ mod tests {
     use crate::guards::Refusal;
     use crate::herdr::{Agent, AgentSession, AgentStatus, Pane, ProcessInfo, Snapshot};
     use crate::ops::EnvResult;
+    use crate::ops::registry::Sleeper;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -642,17 +738,126 @@ mod tests {
     }
 
     #[test]
-    fn at_most_three_agents_are_handled_per_pass() {
+    fn a_dry_run_reports_every_agent_that_is_due() {
+        // It touches nothing and takes no time: it must not hide the agents
+        // behind the first three.
         let fake = Fake::new("cap");
         for n in 1..=5 {
             fake.add(&format!("p{n}"), AgentStatus::Idle, 1);
         }
         let (config, mut state) = (config(0), SweepState::default());
         let report = pass(&fake, &config, &mut state);
-        assert_eq!(report.dry_run.len(), MAX_SLEEPS_PER_SWEEP);
-        assert_eq!(report.deferred, 2);
-        // A dry run leaves the agents awake, so the same ones are due again.
-        assert_eq!(pass(&fake, &config, &mut state).dry_run.len(), 3);
+        assert_eq!(report.dry_run.len(), 5);
+        assert_eq!(report.deferred, 0);
+    }
+
+    #[test]
+    fn a_refusal_does_not_use_up_a_place_either() {
+        let fake = Fake::new("cap-refused");
+        for n in 1..=5 {
+            fake.add(&format!("p{n}"), AgentStatus::Idle, 1);
+        }
+        for n in 1..=4 {
+            fake.refusals
+                .borrow_mut()
+                .insert(format!("p{n}"), Refusal::Focused);
+        }
+        let (config, mut state) = (config(0), SweepState::default());
+        let report = pass(&fake, &config, &mut state);
+        assert_eq!(report.refused.len(), 4);
+        assert_eq!(report.dry_run, ["p5"]);
+    }
+
+    #[test]
+    fn an_abandoned_sleep_is_tried_again_later_and_later_each_time() {
+        let mut clock = AgentClock::default();
+        clock.failed(1_000);
+        assert_eq!(clock.retry_after_ms, 1_000 + RETRY_BASE_MS);
+        clock.failed(2_000);
+        assert_eq!(clock.retry_after_ms, 2_000 + 2 * RETRY_BASE_MS);
+        for _ in 0..20 {
+            clock.failed(3_000);
+        }
+        assert_eq!(clock.retry_after_ms, 3_000 + RETRY_CEILING_MS);
+    }
+
+    #[test]
+    fn an_agent_waiting_for_its_next_try_is_not_due_but_a_sweep_now_takes_it() {
+        let fake = Fake::new("backoff");
+        fake.add("p1", AgentStatus::Idle, 1);
+        let (config, mut state) = (config(0), SweepState::default());
+        pass(&fake, &config, &mut state);
+        state.agents.get_mut("p1").unwrap().retry_after_ms = EPOCH_MS + 10 * MINUTE;
+        assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
+        assert_eq!(sweep_now(&fake, &config, &mut state).dry_run, ["p1"]);
+        fake.advance(10 * MINUTE);
+        assert_eq!(pass(&fake, &config, &mut state).dry_run, ["p1"]);
+    }
+
+    fn registered(fake: &Fake, pane: &str) {
+        let sleeper = Sleeper {
+            kind: "claude".into(),
+            session: "sid".into(),
+            name: None,
+            cwd: "/work".into(),
+            since_ms: EPOCH_MS,
+        };
+        Registry::add(&fake.state_dir, pane, sleeper).unwrap();
+    }
+
+    fn snapshot_of(panes: &[(&str, Option<&str>)]) -> Snapshot {
+        Snapshot {
+            panes: panes
+                .iter()
+                .map(|(pane, agent)| Pane {
+                    pane_id: (*pane).into(),
+                    agent: agent.map(str::to_string),
+                    ..Pane::default()
+                })
+                .collect(),
+            ..Snapshot::default()
+        }
+    }
+
+    fn stale(fake: &Fake, snapshot: &Snapshot) -> Vec<String> {
+        stale_entries(fake, &fake.state_dir, snapshot)
+            .into_iter()
+            .map(|(pane, _)| pane)
+            .collect()
+    }
+
+    #[test]
+    fn an_entry_whose_pane_runs_an_agent_again_is_stale() {
+        let fake = Fake::new("stale-agent");
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        registered(&fake, "p1");
+        registered(&fake, "p2");
+        let snapshot = snapshot_of(&[("p1", Some("claude")), ("p2", Some("sleeping-claude"))]);
+        assert_eq!(stale(&fake, &snapshot), ["p1"]);
+    }
+
+    #[test]
+    fn a_bare_shell_is_stale_only_after_a_wake_that_was_asked_for() {
+        let fake = Fake::new("stale-shell");
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        registered(&fake, "p1");
+        let snapshot = snapshot_of(&[("p1", None)]);
+        // After a Herdr restart: no Wake since the Sleep, `restore` needs it.
+        assert!(stale(&fake, &snapshot).is_empty());
+        let stamp = wake_stamp_path(&fake.state_dir, "p1");
+        std::fs::write(&stamp, (EPOCH_MS - WAKE_GRACE_MS / 2).to_string()).unwrap();
+        assert!(stale(&fake, &snapshot).is_empty());
+        std::fs::write(&stamp, (EPOCH_MS - WAKE_GRACE_MS).to_string()).unwrap();
+        assert_eq!(stale(&fake, &snapshot), ["p1"]);
+    }
+
+    #[test]
+    fn a_pane_a_sleep_holds_keeps_its_entry() {
+        let fake = Fake::new("stale-locked");
+        std::fs::create_dir_all(&fake.state_dir).unwrap();
+        registered(&fake, "p1");
+        let _lock = PaneLock::try_acquire(&fake.state_dir, "p1").unwrap();
+        assert!(stale(&fake, &snapshot_of(&[("p1", Some("claude"))])).is_empty());
     }
 
     #[test]
