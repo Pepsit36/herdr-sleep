@@ -64,6 +64,10 @@ _Avoid_: Resume (reserved for the agent-side command), restore, unpark
 After a Herdr restart, putting every pane back to sleep that was asleep before it or that holds a Saved session. A pane that was asleep gets its Placeholder back without starting any Agent; a Saved session pane first gets its Agent back, one at a time, then sleeps.
 _Avoid_: Resume (reserved for the agent-side command), relaunch
 
+**Live record**:
+What the plugin remembers of every awake Agent (Kind, Session, name, working directory), so that a restart can bring back an Agent that Herdr holds no Saved session for.
+_Avoid_: Registry (that is the list of sleeping panes)
+
 **Saved session**:
 The Session Herdr keeps for a pane whose Agent a restart stopped: the pane is a plain shell with no live Agent, and the Session says which conversation it held.
 _Avoid_: Orphan, dangling session

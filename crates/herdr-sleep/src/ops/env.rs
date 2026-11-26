@@ -44,6 +44,11 @@ pub trait Env {
     ) -> EnvResult<()> {
         Err("starting an agent is not supported here".into())
     }
+    /// Whether Claude Code saved the conversation of `session`, `None` when
+    /// that cannot be told.
+    fn claude_conversation_saved(&self, _session: &str) -> Option<bool> {
+        None
+    }
     /// Type text into a pane without pressing Enter.
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()>;
     /// Press logical keys in a pane.
@@ -182,6 +187,10 @@ impl Env for LiveEnv {
         self.client
             .agent_start(name, kind, pane, timeout, args)
             .map_err(message)
+    }
+
+    fn claude_conversation_saved(&self, session: &str) -> Option<bool> {
+        crate::guards::claude_session_saved(session)
     }
 
     fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {

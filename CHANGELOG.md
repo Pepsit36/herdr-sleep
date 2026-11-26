@@ -14,6 +14,22 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Restart:** every awake agent is recorded as the Watcher sweeps (`live-agents.json`), so an
+  agent that Herdr holds no saved session for, such as one that never went to sleep or a Cursor
+  agent, comes back after `herdr server stop` and a new start, resumed with its session and put to
+  sleep, and keeps its name. An agent you quit before the restart stays closed.
+- **Restart:** with `dry_run = true`, `restore` only journals what it would do (`RESTORE-DRY-RUN`)
+  and touches no pane.
+
+### Changed
+
+- **Restart:** a Claude Code session that never saved a conversation, which cannot be resumed, is
+  started fresh in the same directory instead of failing (`RESTORE-FRESH`).
+- **Sleep:** the `no-session` refusal now says that Herdr reports no session for the agent and
+  names the hook to install (for Cursor, `herdr integration install cursor`).
+
 ## [0.6.4] - 2026-11-25
 
 <!-- stamped -->

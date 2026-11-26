@@ -116,7 +116,9 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::NotManaged => f.write_str("agent kind is not managed"),
-            Refusal::NoSession => f.write_str("no session id"),
+            Refusal::NoSession => f.write_str(
+                "no session id (Herdr reports none for this agent: its hook may be missing, for example `herdr integration install cursor`)",
+            ),
             Refusal::NoConversation => f.write_str("no saved conversation to resume yet"),
             Refusal::NotSettled(status) => write!(f, "agent is {status}, not settled"),
             Refusal::Focused => f.write_str("agent is focused"),
@@ -215,6 +217,16 @@ fn claude_transcript_exists(config_dir: &Path, session_id: &str) -> Option<bool>
             .flatten()
             .any(|project| project.path().join(&file).is_file()),
     )
+}
+
+/// Whether Claude Code saved the conversation of `session_id`, `None` when
+/// that cannot be told.
+pub fn claude_session_saved(session_id: &str) -> Option<bool> {
+    let dir = claude_config_dir(
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        std::env::var_os("HOME"),
+    )?;
+    claude_transcript_exists(&dir, session_id)
 }
 
 /// [`Probe`] backed by the real Herdr and the real processes.
