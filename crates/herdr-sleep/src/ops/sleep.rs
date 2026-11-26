@@ -47,6 +47,10 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const SLEEPING_POLL: Duration = Duration::from_millis(300);
 /// Longest wait for the Placeholder to report.
 const SLEEPING_TIMEOUT: Duration = Duration::from_secs(10);
+/// Poll interval while another Sleep holds the pane.
+const LOCK_POLL: Duration = Duration::from_millis(250);
+/// Longest wait of a manual Sleep for the one holding the pane.
+const LOCK_WAIT: Duration = Duration::from_secs(60);
 /// Title of the notification shown when an agent went to sleep.
 pub const NOTIFICATION_TITLE: &str = "Herdr Sleep";
 
@@ -148,21 +152,38 @@ pub fn sleep_agent(
     // caller read `agent` earlier, and another Sleep may have put it to sleep
     // since. Typing the Placeholder command a second time would hand it to the
     // Placeholder, which replays it into the Agent at the next Wake.
-    let _lock = match PaneLock::try_acquire(&state_dir, pane) {
-        Ok(Some(lock)) => lock,
-        Ok(None) => return SleepOutcome::Skipped(Refusal::Superseded),
-        Err(error) => {
-            journal.log(
-                "WARN",
-                &format!("{label} ({pane}): cannot lock the pane: {error}"),
-            );
-            return SleepOutcome::Aborted(format!("cannot lock the pane: {error}"));
+    // A manual Sleep waits for the one holding the pane, so that it reports
+    // the real outcome (already asleep, refused by a guard) and not a bare
+    // "superseded"; a Sweep just leaves the pane to it.
+    let mut waited = Duration::ZERO;
+    let _lock = loop {
+        match PaneLock::try_acquire(&state_dir, pane) {
+            Ok(Some(lock)) => break lock,
+            Ok(None) if mode != SleepMode::Sweep && waited < LOCK_WAIT => {
+                env.sleep(LOCK_POLL);
+                waited += LOCK_POLL;
+                continue;
+            }
+            Ok(None) => return SleepOutcome::Skipped(Refusal::Superseded),
+            Err(error) => {
+                journal.log(
+                    "WARN",
+                    &format!("{label} ({pane}): cannot lock the pane: {error}"),
+                );
+                return SleepOutcome::Aborted(format!("cannot lock the pane: {error}"));
+            }
         }
     };
-    match env.agent(pane) {
-        Ok(current) if !current.is_sleeping() && current.session_id() == agent.session_id() => {}
+    // From here on the agent is the one Herdr reports now: the caller read
+    // its copy earlier, and a Sweep sleeps its agents one after the other,
+    // seconds apart, so its status and focus may have changed since.
+    let current = match env.agent(pane) {
+        Ok(current) if !current.is_sleeping() && current.session_id() == agent.session_id() => {
+            current
+        }
         _ => return SleepOutcome::Skipped(Refusal::Superseded),
-    }
+    };
+    let agent = &current;
 
     // 1. Guards.
     if let Err(refusal) = env.check_guards(config, agent, mode) {
@@ -468,16 +489,27 @@ fn take_draft(
         Some(guards::DraftRead::Text(text)) => text,
     };
     std::fs::write(&path, &text).map_err(|error| format!("cannot save the draft: {error}"))?;
-    let cleared = env.send_keys(pane, &["ctrl+u"]).is_ok() && {
-        env.sleep(KEY_DELAY);
-        env.screen_ansi(pane, guards::SCREEN_LINES)
-            .is_ok_and(|screen| {
-                guards::prompt_state(&screen, profile) == guards::PromptState::Empty
-            })
-    };
-    if !cleared {
+    if env.send_keys(pane, &["ctrl+u"]).is_err() {
+        // Nothing was erased: the draft is still in the prompt.
         let _ = std::fs::remove_file(&path);
         return Err("cannot clear the draft from the prompt, so it is kept".into());
+    }
+    env.sleep(KEY_DELAY);
+    match env.screen_ansi(pane, guards::SCREEN_LINES) {
+        Ok(screen) if guards::prompt_state(&screen, profile) == guards::PromptState::Empty => {}
+        Ok(_) => {
+            // The prompt did not empty: the draft is still there.
+            let _ = std::fs::remove_file(&path);
+            return Err("cannot clear the draft from the prompt, so it is kept".into());
+        }
+        Err(error) => {
+            // Ctrl+U was sent and the result cannot be seen: the draft may be
+            // gone from the prompt, so the file stays.
+            return Err(format!(
+                "cannot tell whether the draft was cleared ({error}); it is saved in {}",
+                path.display()
+            ));
+        }
     }
     Ok(Some(text))
 }
@@ -496,8 +528,10 @@ fn undo_typing(
         let _ = env.send_keys(pane, &backspaces);
     }
     if let Some(text) = draft {
-        let _ = env.send_text(pane, text);
-        let _ = std::fs::remove_file(draft_path(state_dir, pane));
+        // The file goes only once the text is back in the prompt.
+        if env.send_text(pane, text).is_ok() {
+            let _ = std::fs::remove_file(draft_path(state_dir, pane));
+        }
     }
 }
 
@@ -650,6 +684,10 @@ mod tests {
         calls: RefCell<Vec<String>>,
         state_dir: Option<PathBuf>,
         guards: Result<(), Refusal>,
+        /// Status of the agent each guard check was given.
+        guarded: RefCell<Vec<AgentStatus>>,
+        /// What `herdr agent get` reports when it differs from the caller's copy.
+        fresh_status: Option<AgentStatus>,
         placeholder: bool,
         screen: Result<String, String>,
         rss_kb: Option<u64>,
@@ -670,6 +708,10 @@ mod tests {
         cleared: Cell<bool>,
         /// Another Sleep's Placeholder shows up as soon as the agent quits.
         early_placeholder: bool,
+        /// The screen cannot be read once Ctrl+U was pressed.
+        screen_fails_after_clear: bool,
+        /// Typing text into the pane fails.
+        text_fails: bool,
     }
 
     impl Fake {
@@ -688,6 +730,8 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 state_dir: Some(dir),
                 guards: Ok(()),
+                guarded: RefCell::new(Vec::new()),
+                fresh_status: None,
                 placeholder: true,
                 screen: Ok("\n  last line\n> \n\n".into()),
                 rss_kb: Some(512 * 1024),
@@ -701,6 +745,8 @@ mod tests {
                 cleared_screen: None,
                 cleared: Cell::new(false),
                 early_placeholder: false,
+                screen_fails_after_clear: false,
+                text_fails: false,
                 agent: Agent {
                     pane_id: "w1-2".into(),
                     name: Some("worker".into()),
@@ -792,6 +838,9 @@ mod tests {
         fn agent(&self, target: &str) -> EnvResult<Agent> {
             self.log(format!("agent {target}"));
             let mut agent = self.agent.clone();
+            if let Some(status) = self.fresh_status {
+                agent.agent_status = status;
+            }
             if self.is_sleeping() {
                 agent.agent = Some("sleeping-claude".into());
             }
@@ -816,6 +865,9 @@ mod tests {
 
         fn screen_ansi(&self, pane: &str, lines: usize) -> EnvResult<String> {
             self.log(format!("read-ansi {pane} {lines}"));
+            if self.screen_fails_after_clear && self.cleared.get() {
+                return Err("timeout".into());
+            }
             match (&self.cleared_screen, self.cleared.get()) {
                 (Some(screen), true) => Ok(screen.clone()),
                 _ => self.screen.clone(),
@@ -829,6 +881,9 @@ mod tests {
 
         fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
             self.log(format!("text {pane} {text}"));
+            if self.text_fails {
+                return Err("pane gone".into());
+            }
             Ok(())
         }
 
@@ -870,8 +925,9 @@ mod tests {
         ) -> EnvResult<()> {
             Ok(())
         }
-        fn check_guards(&self, _: &Config, _: &Agent, mode: SleepMode) -> Result<(), Refusal> {
+        fn check_guards(&self, _: &Config, agent: &Agent, mode: SleepMode) -> Result<(), Refusal> {
             self.log(format!("guards {mode:?}"));
+            self.guarded.borrow_mut().push(agent.agent_status);
             self.guards.clone()
         }
 
@@ -927,6 +983,14 @@ mod tests {
         sleep_agent(fake, &config(), &fake.agent, mode, None)
     }
 
+    #[test]
+    fn the_guards_see_the_agent_as_it_is_now_not_as_the_caller_read_it() {
+        let mut fake = Fake::new("fresh-guards");
+        fake.fresh_status = Some(AgentStatus::Working);
+        run(&fake, SleepMode::Sweep);
+        assert_eq!(*fake.guarded.borrow(), [AgentStatus::Working]);
+    }
+
     fn typed(fake: &Fake) -> bool {
         fake.calls()
             .iter()
@@ -941,6 +1005,24 @@ mod tests {
         assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
         assert!(fake.calls().is_empty());
         assert_eq!(fake.journal(), "");
+    }
+
+    #[test]
+    fn a_manual_sleep_waits_for_the_holder_then_gives_up() {
+        let fake = Fake::new("locked-manual");
+        let _other = PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().unwrap();
+        let outcome = run(&fake, SleepMode::Manual);
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
+        assert!(fake.clock() >= LOCK_WAIT, "{:?}", fake.clock());
+        assert!(!typed(&fake));
+    }
+
+    #[test]
+    fn a_sweep_does_not_wait_for_the_holder() {
+        let fake = Fake::new("locked-sweep");
+        let _other = PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().unwrap();
+        run(&fake, SleepMode::Sweep);
+        assert_eq!(fake.clock(), Duration::ZERO);
     }
 
     #[test]
@@ -1285,6 +1367,32 @@ mod tests {
         );
         assert!(!fake.calls().iter().any(|c| c.starts_with("text")));
         assert!(!fake.dir().join("draft-w1-2.txt").exists());
+    }
+
+    #[test]
+    fn a_draft_is_kept_when_the_screen_cannot_be_read_after_ctrl_u() {
+        let mut fake = drafting("draft-blind", "half a thought");
+        fake.screen_fails_after_clear = true;
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(
+            matches!(&outcome, SleepOutcome::Aborted(m) if m.contains("cannot tell")),
+            "{outcome:?}"
+        );
+        // The prompt may be empty now: the text is on disk, nothing is lost.
+        assert_eq!(
+            std::fs::read_to_string(fake.dir().join("draft-w1-2.txt")).unwrap(),
+            "half a thought"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_cannot_be_typed_back_stays_on_disk() {
+        let mut fake = drafting("draft-lost", "half a thought");
+        fake.quit_after = None;
+        fake.text_fails = true;
+        let outcome = sleep_agent(&fake, &with_drafts(), &fake.agent, SleepMode::Manual, None);
+        assert!(matches!(outcome, SleepOutcome::Aborted(_)), "{outcome:?}");
+        assert!(fake.dir().join("draft-w1-2.txt").exists());
     }
 
     #[test]

@@ -297,11 +297,24 @@ pub fn event() -> ExitCode {
 /// make sure the Watcher runs. Always successful: a hook must never fail
 /// loudly, the journal holds the outcome.
 pub fn restore(json: bool) -> ExitCode {
-    let config = Config::load().unwrap_or_else(|error| {
-        eprintln!("herdr-sleep: {error}");
-        Config::default()
-    });
     let env = LiveEnv::new(HerdrClient::from_env());
+    // Not the defaults: a broken configuration could hide `dry_run` or the
+    // exclusions, and the restore starts agents.
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("herdr-sleep: {error}");
+            if let Some(dir) = herdr_sleep::ops::Env::state_dir(&env) {
+                let _ = std::fs::create_dir_all(&dir);
+                herdr_sleep::journal::Journal::new(&dir).log(
+                    "WARN",
+                    &format!("restore: {error}; nothing is restored until the configuration loads"),
+                );
+            }
+            watcher::ensure_watcher_logged();
+            return ExitCode::SUCCESS;
+        }
+    };
     let report = herdr_sleep::ops::restore(&env, &config);
     watcher::ensure_watcher_logged();
     if json {

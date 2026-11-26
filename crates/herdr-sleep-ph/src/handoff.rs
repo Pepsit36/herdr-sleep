@@ -27,19 +27,18 @@ pub fn shell_quote(word: &str) -> String {
 /// reported: it did not get to run, as opposed to an agent the user quit.
 const QUICK_FAILURE_SECS: u32 = 10;
 
-/// POSIX `sh` helper run after the resume command with its exit status and
-/// the command line. It reads how long its parent shell has been alive
-/// (`ps` elapsed time, `[[dd-]hh:]mm:ss`) and, for a quick failure, says what
-/// happened so the pane is not silently left at a bare shell.
+/// POSIX `sh` helper run after the resume command with its exit status, the
+/// command line and the wall-clock second the Wake started at. It says what
+/// happened when the resume command failed within [`QUICK_FAILURE_SECS`] of
+/// the Wake, so the pane is not silently left at a bare shell. The shell of
+/// the pane is the same process as the Placeholder, so its own age would be
+/// the age of the pane: the Wake time is given instead.
 fn failure_report() -> String {
     format!(
         concat!(
             "[ \"$1\" = 0 ] && exit 0; ",
-            "t=$(ps -o etime= -p \"$PPID\" 2>/dev/null | tr -d \" \"); ",
-            "case \"$t\" in ",
-            "\"\"|00:0?) ;; ",
-            "00:[0-9]*) [ \"${{t#00:}}\" -lt {limit} ] || exit 0 ;; ",
-            "*) exit 0 ;; esac; ",
+            "now=$(date +%s); ",
+            "[ $((now - $3)) -lt {limit} ] 2>/dev/null || exit 0; ",
             "printf \"\\nherdr-sleep: the agent could not be resumed (exit status %s).\\n\" \"$1\"; ",
             "printf \"herdr-sleep: command tried: %s\\n\" \"$2\"; ",
             "printf \"herdr-sleep: the session may have no saved conversation. This is a plain shell.\\n\\n\""
@@ -83,11 +82,11 @@ impl ShellFamily {
 /// once, then a login shell. Only the exit status of the resume command is
 /// spelled in the shell's own syntax; the report itself is a POSIX `sh`
 /// script, run by `sh`.
-pub fn wake_script(resume: &[String], shell: &str) -> String {
-    script_for(resume, shell, ShellFamily::of(shell))
+pub fn wake_script(resume: &[String], shell: &str, woke_at: u64) -> String {
+    script_for(resume, shell, ShellFamily::of(shell), woke_at)
 }
 
-fn script_for(resume: &[String], shell: &str, family: ShellFamily) -> String {
+fn script_for(resume: &[String], shell: &str, family: ShellFamily, woke_at: u64) -> String {
     let command: Vec<String> = resume.iter().map(|w| shell_quote(w)).collect();
     let command = command.join(" ");
     let status = match family {
@@ -98,7 +97,7 @@ fn script_for(resume: &[String], shell: &str, family: ShellFamily) -> String {
         }
     };
     format!(
-        "{command}; sh -c {} sh {status} {}; exec {} -l",
+        "{command}; sh -c {} sh {status} {} {woke_at}; exec {} -l",
         shell_quote(&failure_report()),
         shell_quote(&command),
         shell_quote(shell)
@@ -164,6 +163,13 @@ fn spawn_replay(args: &Args, file: &Path) -> io::Result<()> {
     cmd.spawn().map(drop)
 }
 
+/// Seconds since the Unix epoch.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 /// The first directory that still exists: the pane's, `$HOME`, `/`.
 fn working_dir(cwd: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -203,7 +209,11 @@ pub fn run(args: &Args, raw: Option<RawMode>, captured: &[u8]) -> ExitCode {
         .map_or_else(|| "sh".into(), |n| n.to_string_lossy().into_owned());
     let err = Command::new(&args.shell)
         .arg0(format!("-{base}"))
-        .args(["-i", "-c", &wake_script(&args.resume, &args.shell)])
+        .args([
+            "-i",
+            "-c",
+            &wake_script(&args.resume, &args.shell, now_secs()),
+        ])
         .env("PWD", &dir)
         .exec();
     eprintln!("herdr-sleep-ph: cannot run {}: {err}", args.shell);
@@ -235,7 +245,7 @@ mod tests {
     #[test]
     fn script_resumes_reports_a_failure_then_falls_back_to_a_login_shell() {
         let resume = vec!["claude".to_string(), "--resume".into(), "s 1".into()];
-        let script = wake_script(&resume, "/bin/zsh");
+        let script = wake_script(&resume, "/bin/zsh", 1700000000);
         assert!(script.starts_with("claude --resume 's 1'; sh -c '"));
         assert!(script.ends_with("; exec /bin/zsh -l"));
     }
@@ -243,20 +253,20 @@ mod tests {
     #[test]
     fn the_status_is_spelled_in_the_syntax_of_the_shell() {
         let resume = vec!["claude".to_string()];
-        let posix = wake_script(&resume, "/bin/zsh");
+        let posix = wake_script(&resume, "/bin/zsh", 1700000000);
         assert!(
             posix.contains(" sh $? ") && !posix.contains("$status"),
             "{posix}"
         );
-        let login = wake_script(&resume, "-bash");
+        let login = wake_script(&resume, "-bash", 1700000000);
         assert!(login.contains(" sh $? "), "{login}");
-        let fish = wake_script(&resume, "/usr/bin/fish");
+        let fish = wake_script(&resume, "/usr/bin/fish", 1700000000);
         assert!(
             fish.contains(" sh $status ") && !fish.contains("$?"),
             "{fish}"
         );
         // An unknown shell gets a script with no status at all.
-        let other = wake_script(&resume, "/usr/bin/nu");
+        let other = wake_script(&resume, "/usr/bin/nu", 1700000000);
         assert_eq!(other, "claude; exec /usr/bin/nu -l");
     }
 
@@ -282,7 +292,7 @@ mod tests {
         for (resume, report) in [(&["true"][..], false), (&["sh", "-c", "exit 3"][..], true)] {
             // Written for fish, with the login shell replaced by `echo` to see it start.
             let resume: Vec<String> = resume.iter().map(|w| w.to_string()).collect();
-            let script = script_for(&resume, "/bin/echo", ShellFamily::Fish);
+            let script = script_for(&resume, "/bin/echo", ShellFamily::Fish, now_secs());
             let out = Command::new(&fish)
                 .args(["-i", "-c", &script])
                 .stdin(Stdio::null())
@@ -304,9 +314,16 @@ mod tests {
     }
 
     fn run_script(resume: &[&str]) -> String {
+        run_script_woken_at(resume, now_secs())
+    }
+
+    fn run_script_woken_at(resume: &[&str], woke_at: u64) -> String {
         let resume: Vec<String> = resume.iter().map(|w| w.to_string()).collect();
         let out = Command::new("sh")
-            .args(["-c", &script_for(&resume, "/bin/echo", ShellFamily::Posix)])
+            .args([
+                "-c",
+                &script_for(&resume, "/bin/echo", ShellFamily::Posix, woke_at),
+            ])
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -324,6 +341,35 @@ mod tests {
             stdout.ends_with("-l\n"),
             "the shell is still exec'd: {stdout}"
         );
+    }
+
+    #[test]
+    fn a_failure_long_after_the_wake_is_an_agent_the_user_quit() {
+        // The pane is old, the Wake is a minute old: nothing is reported.
+        let stdout = run_script_woken_at(&["sh", "-c", "exit 3"], now_secs() - 60);
+        assert_eq!(stdout, "-l\n");
+    }
+
+    #[test]
+    fn a_failure_is_reported_whatever_the_age_of_the_pane() {
+        // The script runs in a shell that is not new: only the Wake time counts.
+        let out = Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "sleep 2; {}",
+                    script_for(
+                        &["sh".into(), "-c".into(), "exit 3".into()],
+                        "/bin/echo",
+                        ShellFamily::Posix,
+                        now_secs()
+                    )
+                ),
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("could not be resumed"), "{stdout}");
     }
 
     #[test]

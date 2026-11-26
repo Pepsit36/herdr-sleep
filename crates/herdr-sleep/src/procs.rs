@@ -44,7 +44,9 @@ impl ProcessTable {
     /// Read the live process table through `ps`.
     pub fn load() -> io::Result<Self> {
         let output = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,rss=,command="])
+            // `ww` keeps a long command line whole (`--remote-control` at its end),
+            // whatever `COLUMNS` says.
+            .args(["-axwwo", "pid=,ppid=,rss=,command="])
             .output()?;
         if !output.status.success() {
             return Err(io::Error::other(format!(
@@ -213,6 +215,39 @@ pub fn has_any_env_var(pid: i32, names: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
+/// Seconds from `[[dd-]hh:]mm:ss`, the elapsed-time format of `ps`.
+pub fn parse_etime(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, text),
+    };
+    let parts: Vec<u64> = clock
+        .split(':')
+        .map(|part| part.parse().ok())
+        .collect::<Option<_>>()?;
+    let seconds = match parts[..] {
+        [m, s] => m * 60 + s,
+        [h, m, s] => (h * 60 + m) * 60 + s,
+        _ => return None,
+    };
+    Some(days * 86_400 + seconds)
+}
+
+/// Wall-clock milliseconds since the Unix epoch at which process `pid`
+/// started, `None` when it cannot be told.
+pub fn started_ms(pid: i32, now_ms: u64) -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let elapsed = parse_etime(&String::from_utf8_lossy(&output.stdout))?;
+    now_ms.checked_sub(elapsed * 1000)
+}
+
 /// The executable behind process `pid`, as an absolute existing path.
 ///
 /// The first word of the command line is taken, stripped of the leading `-`
@@ -314,6 +349,25 @@ mod tests {
  4102  4101   2048 /bin/sh -c git status
  4112  4030   5120 /usr/local/bin/codex
 ";
+
+    #[test]
+    fn ps_elapsed_times_parse() {
+        assert_eq!(parse_etime("05:09"), Some(309));
+        assert_eq!(parse_etime("  1:02:03 "), Some(3723));
+        assert_eq!(
+            parse_etime("2-03:04:05"),
+            Some(2 * 86_400 + 3 * 3600 + 4 * 60 + 5)
+        );
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("abc"), None);
+    }
+
+    #[test]
+    fn this_process_started_before_now() {
+        let now = 1_900_000_000_000;
+        let started = started_ms(i32::try_from(std::process::id()).unwrap(), now).unwrap();
+        assert!(started <= now);
+    }
 
     #[test]
     fn parses_linux_sample() {

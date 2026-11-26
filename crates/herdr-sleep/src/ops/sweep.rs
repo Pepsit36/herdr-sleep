@@ -152,8 +152,13 @@ fn record_live_agents(env: &dyn Env, config: &Config, state: &mut SweepState, sn
         return;
     };
     let mut live = LiveAgents::load(&dir);
-    if live.refresh(snapshot, config, &mut state.alive, env.now_millis())
-        && let Err(error) = live.save(&dir)
+    if live.refresh(
+        snapshot,
+        config,
+        &mut state.alive,
+        env.now_millis(),
+        &|pane| env.pane_shell_started_ms(pane),
+    ) && let Err(error) = live.save(&dir)
     {
         Journal::new(&dir).log(
             "WARN",

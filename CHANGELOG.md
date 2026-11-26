@@ -14,6 +14,39 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-26
+
+<!-- stamped -->
+
+### Fixed
+
+- **Sleep:** the guards now judge the agent as Herdr reports it at that moment. A sweep puts its
+  agents to sleep one after the other, seconds apart, and used to check the second one with the
+  status and focus it had when the sweep began: an agent that had started working, or that you had
+  just focused, could still be sent `/exit`.
+- **Sleep:** a colored background on the prompt line (`ESC[48;2;...m`) no longer makes the text look
+  faint, which hid a draft and let the exit command be typed after it. Hyperlink and title
+  sequences are no longer read as text.
+- **Sleep:** when the draft cannot be checked after it was cleared from the prompt (a Herdr call
+  timing out), the draft stays on disk and the message says so, instead of being deleted. A draft
+  that could not be typed back after a failed sleep is kept too.
+- **Wake:** a resume that fails right away is explained in the pane again, whatever the age of the
+  pane. The check used the age of the pane's shell, so it never fired for a pane open for more than
+  ten seconds.
+- **Wake:** an agent that is back at its prompt counts as ready whatever `sleep_statuses` holds.
+  With `sleep_statuses = ["done"]` a wake used to wait two minutes and replay nothing.
+- **Watcher:** with a configuration that does not load at startup, the watcher puts nothing to sleep
+  (it used the defaults, ignoring `dry_run` and exclusions), and `restore` starts no agent. Both say
+  so in the journal.
+- **Sleep:** a manual sleep that meets a sleep already running on the same pane waits for it and
+  reports the real outcome, instead of answering `superseded`.
+- **Restart:** an agent you quit just before stopping the server is not brought back, even when no
+  sweep ran in between: the pane's shell, older than the last time the agent was seen, tells a quit
+  from a restart.
+- **Install:** the minimum Rust version is 1.88, which the code needs, and a signal during
+  `scripts/build.sh` ends the script instead of continuing with a source build. Long command lines
+  are no longer cut by `ps`, which hid `--remote-control` at their end.
+
 ## [0.7.0] - 2026-11-26
 
 <!-- stamped -->

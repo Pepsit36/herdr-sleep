@@ -366,14 +366,13 @@ pub fn check(ctx: &GuardContext<'_>, mode: SleepMode) -> Result<(), Refusal> {
         return Err(Refusal::RemoteControl);
     }
 
-    if let Some(environment) = ctx.probe.environment(pid) {
-        if let Some(var) = config
+    if let Some(environment) = ctx.probe.environment(pid)
+        && let Some(var) = config
             .protect_env_vars
             .iter()
             .find(|var| environment.iter().any(|(key, _)| key == *var))
-        {
-            return Err(Refusal::ProtectedEnv(var.clone()));
-        }
+    {
+        return Err(Refusal::ProtectedEnv(var.clone()));
     }
 
     let busy: Vec<&str> = ctx
@@ -488,10 +487,10 @@ fn check_filters(config: &Config, agent: &Agent) -> Result<(), Refusal> {
     if let Some(name) = name.filter(|n| config.name_excluded(n)) {
         return Err(Refusal::NameExcluded(name.to_string()));
     }
-    if let Some(cwd) = agent.effective_cwd() {
-        if config.cwd_excluded(cwd) {
-            return Err(Refusal::CwdExcluded(cwd.to_string()));
-        }
+    if let Some(cwd) = agent.effective_cwd()
+        && config.cwd_excluded(cwd)
+    {
+        return Err(Refusal::CwdExcluded(cwd.to_string()));
     }
     Ok(())
 }
@@ -696,6 +695,19 @@ fn parse_cells(line: &str) -> Vec<Cell> {
                     apply_sgr(&params, &mut faint, &mut grey);
                 }
             }
+            // OSC (a hyperlink, a title): up to BEL or `ESC \`, never text.
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
             // Two-character escape such as `ESC ( B`: drop the next char.
             Some(_) => {
                 chars.next();
@@ -718,17 +730,28 @@ fn apply_sgr(params: &str, faint: &mut bool, grey: &mut bool) {
             2 => *faint = true,
             22 => *faint = false,
             39 | 30..=37 | 90..=97 => *grey = false,
-            38 => match codes.get(i + 1) {
-                Some(2) => {
-                    *grey = codes.get(i + 2..i + 5) == Some(&GREY_RGB[..]);
-                    i += 4;
+            // Foreground (38), background (48) and underline (58) colours take
+            // their parameters along: skipping them keeps the `2` of
+            // `48;2;R;G;B` from reading as faint. Only the foreground can be
+            // the grey of a placeholder.
+            38 | 48 | 58 => {
+                let foreground = codes[i] == 38;
+                match codes.get(i + 1) {
+                    Some(2) => {
+                        if foreground {
+                            *grey = codes.get(i + 2..i + 5) == Some(&GREY_RGB[..]);
+                        }
+                        i += 4;
+                    }
+                    Some(5) => {
+                        if foreground {
+                            *grey = false;
+                        }
+                        i += 2;
+                    }
+                    _ => {}
                 }
-                Some(5) => {
-                    *grey = false;
-                    i += 2;
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
         i += 1;
@@ -1004,6 +1027,30 @@ mod tests {
         assert_eq!(state("\u{203A} \n", "gemini"), PromptState::NotFound);
         assert_eq!(state("\u{2192} \n", "cursor"), PromptState::Empty);
         assert!(is_ready_screen("> \n", &profile("gemini")));
+    }
+
+    #[test]
+    fn a_coloured_background_does_not_make_the_text_faint() {
+        // `48;2;R;G;B` carries a `2` that is not SGR faint.
+        for sgr in ["48;2;40;40;40", "48;5;236", "58;2;1;2;3", "48:2:40:40:40"] {
+            let cells = parse_cells(&esc(&format!("\\e[{sgr}m\u{276F} hello")));
+            assert!(cells.iter().all(|c| !c.dim), "{sgr}: {cells:?}");
+        }
+        // A real faint after it still counts.
+        let cells = parse_cells(&esc("\\e[48;2;40;40;40m\\e[2mhint"));
+        assert!(cells.iter().all(|c| c.dim));
+    }
+
+    #[test]
+    fn osc_sequences_are_not_text() {
+        let text = |line: &str| {
+            parse_cells(&esc(line))
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        assert_eq!(text("\\e]8;;https://x.y\\e\\link\\e]8;;\\e\\"), "link");
+        assert_eq!(text("\\e]0;title\u{7}abc"), "abc");
     }
 
     #[test]
