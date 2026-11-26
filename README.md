@@ -55,7 +55,11 @@ Update with `herdr plugin update`.
    section of Herdr's config so that Herdr does not also relaunch them. Panes that were asleep get
    their placeholder back without starting any agent. Agents that were awake (Herdr keeps their
    saved session) are started again with `--resume`, one at a time, and put to sleep as soon as they
-   are ready. Only panes that still exist, have no agent, sit at a shell prompt and still have their
+   are ready. An agent for which Herdr holds no saved session, which was awake and never slept, comes
+   back from the plugin's own record (`live-agents.json`, refreshed by every sweep pass), and keeps
+   its name. An agent that you quit while Herdr ran is not brought back. Cursor needs `herdr
+   integration install cursor` for Herdr to report its session, which every restore depends on. Only
+   panes that still exist, have no agent, sit at a shell prompt and still have their
    working directory are handled. Herdr starts a restored pane's shell when a client attaches, so
    the plugin looks again, round after round, at the panes that are not ready yet, for up to twice
    `restore_settle_timeout_seconds`, without holding the others back. The others are left alone and
@@ -241,7 +245,11 @@ is replayed into the agent once it is ready.
   agent is still resumed, but a failure is silent.
 - **Nothing happens at all.** Run `herdr-sleep ensure-watcher`, then check the journal,
   `herdr-sleep.log` in the plugin's state directory (printed by `herdr-sleep status`).
-- **See what would happen** with `dry_run = true`.
+- **See what would happen** with `dry_run = true`: `restore` then only journals `RESTORE-DRY-RUN
+  <pane> kind=<kind> source=registry|saved-session|record` and touches no pane.
+- **Try a restart without touching your session:** `herdr --session test` starts a separate Herdr
+  with its own server, so `herdr --session test server stop` and a new `herdr --session test` never
+  touch the main one. Never run `herdr server stop` without `--session` for a test.
 - Sleeping panes after a Herdr restart appear once a Herdr client attaches; panes the plugin could
   not restore are listed as `RESTORE-SKIP <pane> <reason>` in the journal (and by `herdr-sleep
   status`), followed by a `RESTORE-DONE restored=N skipped=M missing_cwd=K` line. Panes whose

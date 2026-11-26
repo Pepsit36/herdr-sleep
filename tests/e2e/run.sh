@@ -439,6 +439,8 @@ s9_restart_with_an_awake_agent() {
   fi
   start_agent "$second" beta || return
   sid_b="$(agent_session "$second")"
+  # The Watcher records every live agent, so the restart gives beta its name back.
+  if wait_for 30 grep -q '"name": "beta"' "$STATE_DIR/live-agents.json"; then ok "the live record holds beta"; else bad "live-agents.json has no beta: $(cat "$STATE_DIR/live-agents.json" 2>&1 | head -c 300)"; fi
   # alpha sleeps (it is in the registry); beta stays awake and idle, so only Herdr's Saved
   # session knows it after the restart.
   sleep_alpha || return
@@ -460,8 +462,8 @@ s9_restart_with_an_awake_agent() {
     return
   fi
   if pgrep -u "$(id -u)" -x claude >/dev/null; then bad "a claude process runs after the restart"; else ok "no agent process was started"; fi
-  # Herdr forgets the name of an agent that never slept: it comes back as <kind>-<pane>.
-  if wait_for 15 is_named "$second" "claude-${second//:/_}"; then ok "beta gets the fallback name claude-${second//:/_}"; else bad "beta's name is '$(agent_name "$second")'"; fi
+  # Herdr forgets the name of an agent that never slept: the live record gives it back.
+  if wait_for 15 is_named "$second" beta; then ok "beta keeps its name"; else bad "beta's name is '$(agent_name "$second")', expected beta"; fi
   if wait_for 20 grep -q "RESTORE-DONE restored=2 skipped=0 missing_cwd=0" "$STATE_DIR/herdr-sleep.log"; then ok "the journal sums the restore up"; else bad "no RESTORE-DONE restored=2 line"; fi
   herdr pane send-keys "$second" enter >/dev/null 2>&1
   if wait_for 40 is_awake_idle "$second"; then ok "beta wakes"; else bad "beta did not wake (kind=$(agent_kind "$second"))"; fi
@@ -637,6 +639,30 @@ s19_overlapping_sleeps() {
   if screen_has "$PANE_A" "herdr-sleep-ph"; then bad "the Placeholder command was typed into the agent"; else ok "nothing was typed into the agent"; fi
 }
 
+s20_a_quit_agent_is_not_restored() {
+  new_world "$CONFIG_MANUAL" || return
+  local split second
+  split="$(herdr pane split "$PANE_A" --direction right --no-focus)"
+  second="$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id // empty' <<<"$split")"
+  [ -n "$second" ] || { bad "pane split gave no pane: $split"; return; }
+  start_agent "$second" gamma || return
+  if wait_for 30 grep -q '"name": "gamma"' "$STATE_DIR/live-agents.json"; then ok "the live record holds gamma"; else bad "gamma is not in live-agents.json"; return; fi
+  # The user quits gamma: the Watcher sees it go and forgets it.
+  herdr pane send-text "$second" "/exit" >/dev/null 2>&1
+  herdr pane send-keys "$second" enter >/dev/null 2>&1
+  no_agent() { [ -z "$(agent_kind "$1")" ]; }
+  if wait_for 30 no_agent "$second"; then ok "gamma quit"; else bad "gamma is still '$(agent_kind "$second")'"; return; fi
+  no_record() { ! grep -q '"name": "gamma"' "$STATE_DIR/live-agents.json"; }
+  if wait_for 30 no_record; then ok "the record of gamma is gone"; else bad "gamma is still recorded"; fi
+  sleep_alpha || return
+  stop_server || { bad "the server did not stop"; return; }
+  start_server || { bad "the server did not restart"; return; }
+  attach_client
+  if wait_for 90 is_asleep "$PANE_A"; then ok "alpha is sleeping-claude again"; else bad "alpha is '$(agent_kind "$PANE_A")'"; fi
+  sleep 5
+  if no_agent "$second" && ! grep -q "RESTORE-RESUME $second" "$STATE_DIR/herdr-sleep.log"; then ok "gamma, quit before the restart, stays a shell"; else bad "gamma was brought back (kind=$(agent_kind "$second"))"; fi
+}
+
 SCENARIOS=(
   "s1|sleep by sweep|s1_sleep_by_sweep"
   "s2|wake by Enter|s2_wake_by_enter"
@@ -657,6 +683,7 @@ SCENARIOS=(
   "s17|a tab kept awake does not sleep|s17_keep_tab_awake"
   "s18|a woken pane loses its marker|s18_woken_pane_loses_its_marker"
   "s19|overlapping sleeps type once|s19_overlapping_sleeps"
+  "s20|an agent the user quit is not restored|s20_a_quit_agent_is_not_restored"
 )
 
 # ---------------------------------------------------------------------------

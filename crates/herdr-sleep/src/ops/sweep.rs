@@ -20,6 +20,7 @@ use crate::guards::SleepMode;
 use crate::herdr::{Agent, Snapshot};
 use crate::journal::Journal;
 
+use super::live_agents::{self, LiveAgents};
 use super::registry::{self, Registry};
 use super::{Env, SleepOutcome, sleep_agent, sync_markers};
 
@@ -47,6 +48,11 @@ pub struct AgentClock {
 pub struct SweepState {
     #[serde(default)]
     pub agents: BTreeMap<String, AgentClock>,
+    /// Panes this process saw with an Agent: what tells an Agent that quit
+    /// from one Herdr has not brought back yet. Never saved: after a restart
+    /// the new Watcher has seen nothing.
+    #[serde(skip)]
+    pub alive: HashSet<String>,
 }
 
 impl SweepState {
@@ -140,6 +146,22 @@ fn prune_registry(env: &dyn Env, snapshot: &Snapshot) {
     }
 }
 
+/// Refresh the record of live Agents that `restore` falls back on.
+fn record_live_agents(env: &dyn Env, config: &Config, state: &mut SweepState, snapshot: &Snapshot) {
+    let Some(dir) = env.state_dir() else {
+        return;
+    };
+    let mut live = LiveAgents::load(&dir);
+    if live.refresh(snapshot, config, &mut state.alive, env.now_millis())
+        && let Err(error) = live.save(&dir)
+    {
+        Journal::new(&dir).log(
+            "WARN",
+            &format!("cannot save {}: {error}", live_agents::FILE_NAME),
+        );
+    }
+}
+
 /// Run one Sweep: update the idle clocks in `state` and put to sleep the
 /// agents that are due.
 pub fn sweep_once(env: &dyn Env, config: &Config, state: &mut SweepState) -> SweepReport {
@@ -179,6 +201,7 @@ fn sweep_pass(
         }
     };
     prune_registry(env, &snapshot);
+    record_live_agents(env, config, state, &snapshot);
     let now = env.now_millis();
     let sleep_after_ms = u64::try_from(config.sleep_after().as_millis()).unwrap_or(u64::MAX);
 
@@ -547,6 +570,38 @@ mod tests {
         assert_eq!(report.considered, 1);
         assert_eq!(report.dry_run, ["p3"]);
         assert_eq!(state.agents.keys().collect::<Vec<_>>(), ["p3"]);
+    }
+
+    #[test]
+    fn every_pass_records_the_live_agents_for_a_restart() {
+        let fake = Fake::new("live");
+        fake.panes.borrow_mut().push("p1".into());
+        fake.add("p1", AgentStatus::Working, 1);
+        fake.update("p1", |a| a.cwd = Some("/work".into()));
+        let mut state = SweepState::default();
+        pass(&fake, &config(600), &mut state);
+        let live = LiveAgents::load(&fake.state_dir);
+        assert_eq!(live.panes["p1"].session, "sid");
+        assert_eq!(live.panes["p1"].cwd, "/work");
+
+        // The agent quits while the Watcher looks: its record goes.
+        fake.agents.borrow_mut().clear();
+        pass(&fake, &config(600), &mut state);
+        assert!(LiveAgents::load(&fake.state_dir).panes.is_empty());
+    }
+
+    #[test]
+    fn a_new_watcher_keeps_the_record_of_agents_herdr_has_not_brought_back() {
+        let fake = Fake::new("live-restart");
+        fake.panes.borrow_mut().push("p1".into());
+        fake.add("p1", AgentStatus::Working, 1);
+        fake.update("p1", |a| a.cwd = Some("/work".into()));
+        pass(&fake, &config(600), &mut SweepState::default());
+
+        // Herdr restarted: the pane is a shell, the Watcher is new.
+        fake.agents.borrow_mut().clear();
+        pass(&fake, &config(600), &mut SweepState::default());
+        assert!(LiveAgents::load(&fake.state_dir).panes.contains_key("p1"));
     }
 
     #[test]

@@ -21,7 +21,7 @@
 //! loudly: a pane that does not qualify is skipped and the reason goes to the
 //! journal.
 //!
-//! Journal events: `RESTORE-START panes=N registered=M saved=K`,
+//! Journal events: `RESTORE-DRY-RUN`, `RESTORE-FRESH`, `RESTORE-START panes=N registered=M saved=K recorded=R`,
 //! `RESTORE <pane>`, `RESTORE-RETRY <pane> <reason>`,
 //! `RESTORE-SKIP <pane> <reason>` (also for a pane Herdr shows asleep that the
 //! registry does not know), `RESTORE-CWD <pane> <cwd>`,
@@ -40,6 +40,7 @@ use crate::herdr::{Pane, Snapshot};
 use crate::journal::Journal;
 
 use super::Env;
+use super::live_agents::LiveAgents;
 use super::markers::sync_markers;
 use super::registry::{Registry, Sleeper};
 use super::sleep::{
@@ -182,6 +183,8 @@ struct Candidate {
     sleeper: Sleeper,
     /// The pane comes from a Saved session, not from the registry.
     saved: bool,
+    /// Herdr holds no session for the pane: the record of live Agents does.
+    recorded: bool,
 }
 
 /// Why a pane's Saved session cannot make a Sleeper.
@@ -225,6 +228,7 @@ fn candidates(
     env: &dyn Env,
     config: &Config,
     registry: &Registry,
+    live: &LiveAgents,
     snapshot: &Snapshot,
     report: &mut RestoreReport,
 ) -> Vec<Candidate> {
@@ -239,6 +243,7 @@ fn candidates(
                 pane: pane.clone(),
                 sleeper: sleeper.clone(),
                 saved: false,
+                recorded: false,
             });
         }
     }
@@ -254,15 +259,43 @@ fn candidates(
                 .push((pane.pane_id.clone(), "sleeping-agent-not-registered".into()));
             continue;
         }
+        // Herdr holds no session for an Agent it never saw report one (a
+        // Cursor without its hook, an Agent started before its hook): the
+        // record of live Agents knows it.
         if pane.agent_session.is_none() {
+            let Some(record) = live.panes.get(&pane.pane_id) else {
+                continue;
+            };
+            if pane.has_agent() || !config.is_managed(&record.kind) {
+                continue;
+            }
+            if !env.dir_exists(&record.cwd) {
+                report
+                    .missing_cwd
+                    .push((pane.pane_id.clone(), record.cwd.clone()));
+                continue;
+            }
+            found.push(Candidate {
+                pane: pane.pane_id.clone(),
+                sleeper: record.clone(),
+                saved: true,
+                recorded: true,
+            });
             continue;
         }
         match saved_sleeper(env, config, pane) {
-            Ok(sleeper) => found.push(Candidate {
-                pane: pane.pane_id.clone(),
-                sleeper,
-                saved: true,
-            }),
+            Ok(mut sleeper) => {
+                // Herdr forgets the name of an Agent that never slept.
+                if sleeper.name.is_none() {
+                    sleeper.name = live.panes.get(&pane.pane_id).and_then(|r| r.name.clone());
+                }
+                found.push(Candidate {
+                    pane: pane.pane_id.clone(),
+                    sleeper,
+                    saved: true,
+                    recorded: false,
+                });
+            }
             Err(Unfit::Skip(reason)) => report.skipped.push((pane.pane_id.clone(), reason)),
             Err(Unfit::MissingCwd(cwd)) => report.missing_cwd.push((pane.pane_id.clone(), cwd)),
         }
@@ -288,14 +321,16 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
         }
     };
     let registry = Registry::load(&state_dir);
-    let mut pending = candidates(env, config, &registry, &snapshot, &mut report);
+    let live = LiveAgents::load(&state_dir);
+    let mut pending = candidates(env, config, &registry, &live, &snapshot, &mut report);
     journal.log(
         "RESTORE-START",
         &format!(
-            "panes={} registered={} saved={}",
+            "panes={} registered={} saved={} recorded={}",
             snapshot.panes.len(),
             pending.iter().filter(|c| !c.saved).count(),
-            pending.iter().filter(|c| c.saved).count()
+            pending.iter().filter(|c| c.saved && !c.recorded).count(),
+            pending.iter().filter(|c| c.recorded).count()
         ),
     );
     for (pane, reason) in &report.skipped {
@@ -306,6 +341,29 @@ pub fn restore(env: &dyn Env, config: &Config) -> RestoreReport {
     }
     if pending.is_empty() && report.skipped.is_empty() && report.missing_cwd.is_empty() {
         return report;
+    }
+
+    // `dry_run` only says what would be done: nothing is typed or started.
+    if config.dry_run {
+        for candidate in pending.drain(..) {
+            let source = if candidate.recorded {
+                "record"
+            } else if candidate.saved {
+                "saved-session"
+            } else {
+                "registry"
+            };
+            journal.log(
+                "RESTORE-DRY-RUN",
+                &format!(
+                    "{} kind={} source={source}",
+                    candidate.pane, candidate.sleeper.kind
+                ),
+            );
+            report
+                .skipped
+                .push((candidate.pane, "dry-run: nothing is restored".into()));
+        }
     }
 
     let timeout = config.restore_settle_timeout();
@@ -575,7 +633,15 @@ fn resume_then_sleep(
     if config.dry_run {
         return Err(Skip::final_("dry-run: the agent is not resumed"));
     }
-    let resume = profile.resume_argv(&sleeper.session);
+    // A Claude Code session that never saved a conversation cannot be
+    // resumed (`--resume` fails): the Agent starts fresh in the same
+    // directory, which loses nothing.
+    let fresh = kind == "claude" && env.claude_conversation_saved(&sleeper.session) == Some(false);
+    let resume = if fresh {
+        vec![profile.bin.clone()]
+    } else {
+        profile.resume_argv(&sleeper.session)
+    };
     if let Some(word) = resume.iter().find(|word| !is_typeable(word)) {
         return Err(Skip::final_(format!(
             "cannot type {word:?} safely into a shell (control character or backslash)"
@@ -591,6 +657,12 @@ fn resume_then_sleep(
     }
 
     let name = resumed_name(sleeper, pane);
+    if fresh {
+        journal.log(
+            "RESTORE-FRESH",
+            &format!("{pane} kind={kind} no saved conversation to resume"),
+        );
+    }
     journal.log("RESTORE-RESUME", &format!("{pane} kind={kind}"));
     // The profile's command starts with the binary, which `agent start`
     // already knows from the kind.
@@ -708,6 +780,8 @@ mod tests {
         /// Herdr keeps a Saved session for this registered pane, with no
         /// agent label, for good.
         session_only: bool,
+        /// Herdr reports no session for this pane, with or without an Agent.
+        no_session: bool,
     }
 
     impl Spec {
@@ -719,6 +793,7 @@ mod tests {
                 run_fails: false,
                 saved_cwd: None,
                 session_only: false,
+                no_session: false,
             }
         }
 
@@ -754,6 +829,8 @@ mod tests {
         saved_name: Option<String>,
         /// Panes Herdr shows as `sleeping-claude` that the registry lacks.
         unknown_sleepers: Vec<String>,
+        /// Sessions whose conversation Claude Code never saved.
+        unsaved: Vec<String>,
         /// The Guards refuse the resumed agent.
         guard: Option<Refusal>,
         /// Saved session panes whose agent was started again.
@@ -789,6 +866,7 @@ mod tests {
                 start_fails_but_runs: false,
                 saved_name: Some("worker".into()),
                 unknown_sleepers: Vec::new(),
+                unsaved: Vec::new(),
                 guard: None,
                 live: RefCell::new(BTreeMap::new()),
                 quit: RefCell::new(Default::default()),
@@ -811,14 +889,14 @@ mod tests {
                 pane_id: pane.into(),
                 name: self.saved_name.clone(),
                 agent: held.then(|| self.saved_kind.clone()),
-                agent_session: (spec.saved_cwd.is_some() || spec.session_only).then(|| {
-                    AgentSession {
+                agent_session: ((spec.saved_cwd.is_some() && !spec.no_session)
+                    || spec.session_only)
+                    .then(|| AgentSession {
                         source: "herdr:claude".into(),
                         agent: Some(self.saved_kind.clone()),
                         kind: Some("id".into()),
                         value: format!("sess-{pane}"),
-                    }
-                }),
+                    }),
                 cwd: spec.saved_cwd.clone(),
                 restore_error: self
                     .restore_errors
@@ -963,7 +1041,15 @@ mod tests {
                     agent: Some(self.saved_kind.clone()),
                     agent_status: AgentStatus::Idle,
                     cwd: pane.cwd,
-                    agent_session: pane.agent_session,
+                    // A running Agent reports its session itself.
+                    agent_session: pane.agent_session.or_else(|| {
+                        Some(AgentSession {
+                            source: "herdr:claude".into(),
+                            agent: Some(self.saved_kind.clone()),
+                            kind: Some("id".into()),
+                            value: format!("sess-{target}"),
+                        })
+                    }),
                     ..Agent::default()
                 });
             }
@@ -1016,6 +1102,10 @@ mod tests {
                 return Err("invalid_agent_name".into());
             }
             Ok(())
+        }
+
+        fn claude_conversation_saved(&self, session: &str) -> Option<bool> {
+            self.unsaved.iter().any(|s| s == session).then_some(false)
         }
 
         fn send_text(&self, pane: &str, text: &str) -> EnvResult<()> {
@@ -1134,7 +1224,7 @@ mod tests {
         assert_eq!(
             fake.journal(),
             [
-                "RESTORE-START panes=2 registered=2 saved=0",
+                "RESTORE-START panes=2 registered=2 saved=0 recorded=0",
                 "RESTORE w1-2",
                 "RESTORE w1-3",
                 "RESTORE-DONE restored=2 skipped=0 missing_cwd=0"
@@ -1221,7 +1311,7 @@ mod tests {
         assert_eq!(
             fake.journal(),
             [
-                "RESTORE-START panes=1 registered=1 saved=0",
+                "RESTORE-START panes=1 registered=1 saved=0 recorded=0",
                 "RESTORE-RETRY w1-2 identity-not-released",
                 "RESTORE-SKIP w1-2 identity-not-released",
                 "RESTORE-DONE restored=0 skipped=1 missing_cwd=0"
@@ -1373,7 +1463,7 @@ mod tests {
         assert_eq!(run(&fake), RestoreReport::default());
         assert_eq!(
             fake.journal(),
-            ["RESTORE-START panes=0 registered=0 saved=0"]
+            ["RESTORE-START panes=0 registered=0 saved=0 recorded=0"]
         );
         assert!(fake.calls().is_empty());
     }
@@ -1670,6 +1760,87 @@ mod tests {
         );
     }
 
+    fn record(fake: &Fake, pane: &str, session: &str, name: Option<&str>) {
+        let mut live = LiveAgents::default();
+        live.panes.insert(
+            pane.into(),
+            Sleeper {
+                kind: "claude".into(),
+                session: session.into(),
+                name: name.map(Into::into),
+                cwd: "/proj".into(),
+                since_ms: 1,
+            },
+        );
+        live.save(&fake.state_dir).unwrap();
+    }
+
+    #[test]
+    fn an_agent_herdr_holds_no_session_for_comes_back_from_the_live_record() {
+        let fake = Fake::new("recorded").pane(
+            "w1-2",
+            Spec {
+                no_session: true,
+                ..Spec::saved("/proj")
+            },
+        );
+        record(&fake, "w1-2", "sess-rec", Some("cursor-orch"));
+        let report = run(&fake);
+        assert_eq!(report.restored, ["w1-2"]);
+        let started = starts(&fake);
+        assert_eq!(started.len(), 1);
+        assert!(
+            started[0].starts_with("start cursor-orch claude w1-2 "),
+            "{started:?}"
+        );
+        assert!(started[0].ends_with("--resume sess-rec"), "{started:?}");
+        assert!(
+            fake.journal()[0].ends_with("registered=0 saved=0 recorded=1"),
+            "{:?}",
+            fake.journal()
+        );
+    }
+
+    #[test]
+    fn a_record_does_not_resume_a_pane_that_shows_an_agent_or_no_record_exists() {
+        let fake = Fake::new("no-record").pane(
+            "w1-2",
+            Spec {
+                no_session: true,
+                ..Spec::saved("/proj")
+            },
+        );
+        let report = run(&fake);
+        assert!(report.restored.is_empty());
+        assert!(starts(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_saved_session_gets_its_name_back_from_the_record() {
+        let mut fake = Fake::new("name").pane("w1-2", Spec::saved("/proj"));
+        fake.saved_name = None;
+        record(&fake, "w1-2", "sess-w1-2", Some("kept-name"));
+        run(&fake);
+        assert!(starts(&fake)[0].starts_with("start kept-name claude w1-2 "));
+    }
+
+    #[test]
+    fn a_session_that_never_saved_a_conversation_starts_fresh() {
+        let mut fake = Fake::new("fresh").pane("w1-2", Spec::saved("/proj"));
+        fake.unsaved.push("sess-w1-2".into());
+        run(&fake);
+        let started = starts(&fake);
+        assert_eq!(started.len(), 1);
+        assert!(!started[0].contains("--resume"), "{started:?}");
+        assert!(
+            fake.journal()
+                .iter()
+                .any(|l| l.contains("RESTORE-FRESH w1-2")),
+            "{:?}",
+            fake.journal()
+        );
+    }
+
     fn starts(fake: &Fake) -> Vec<String> {
         fake.calls()
             .into_iter()
@@ -1874,6 +2045,12 @@ mod tests {
         let report = restore(&fake, &config);
         assert_eq!(report.skipped.len(), 1);
         assert!(starts(&fake).is_empty());
+        assert!(fake.runs().is_empty());
+        assert!(
+            fake.journal()
+                .iter()
+                .any(|l| l.contains("RESTORE-DRY-RUN w1-2 kind=claude source=saved-session"))
+        );
     }
 
     #[test]
