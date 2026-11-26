@@ -257,7 +257,9 @@ pub fn run_loop(
         .as_deref()
         .map(SweepState::load)
         .unwrap_or_default();
-    let mut config = Config::default();
+    // `None` until a configuration loads: with a broken one at startup the
+    // defaults would sleep agents the user excluded, or ignore `dry_run`.
+    let mut config: Option<Config> = None;
     let mut last_config_error: Option<String> = None;
     let mut status_failures = 0;
 
@@ -279,12 +281,17 @@ pub fn run_loop(
         }
         match load_config() {
             Ok(loaded) => {
-                config = loaded;
+                config = Some(loaded);
                 last_config_error = None;
             }
             Err(error) => {
                 if last_config_error.as_ref() != Some(&error) {
-                    warn(format!("config: {error}; keeping the previous one"));
+                    let outcome = if config.is_some() {
+                        "keeping the previous one"
+                    } else {
+                        "no valid configuration yet, so nothing is put to sleep"
+                    };
+                    warn(format!("config: {error}; {outcome}"));
                     last_config_error = Some(error);
                 }
             }
@@ -292,21 +299,23 @@ pub fn run_loop(
 
         if host.herdr_ok() {
             status_failures = 0;
-            let report = sweep_once(env, &config, &mut state);
-            if let Some(error) = &report.error {
-                warn(format!("sweep: {error}"));
-            } else if report.is_eventful()
-                && let Some(journal) = &journal
-            {
-                journal.log(
-                    "SWEEP",
-                    &format!(
-                        "considered={} slept={} refused={}",
-                        report.considered,
-                        report.slept.len(),
-                        report.refused.len()
-                    ),
-                );
+            if let Some(config) = &config {
+                let report = sweep_once(env, config, &mut state);
+                if let Some(error) = &report.error {
+                    warn(format!("sweep: {error}"));
+                } else if report.is_eventful()
+                    && let Some(journal) = &journal
+                {
+                    journal.log(
+                        "SWEEP",
+                        &format!(
+                            "considered={} slept={} refused={}",
+                            report.considered,
+                            report.slept.len(),
+                            report.refused.len()
+                        ),
+                    );
+                }
             }
         } else {
             status_failures += 1;
@@ -318,7 +327,12 @@ pub fn run_loop(
             }
         }
 
-        for _ in 0..config.sweep_interval_seconds.max(1) {
+        let interval = config
+            .as_ref()
+            .map_or(Config::default().sweep_interval_seconds, |c| {
+                c.sweep_interval_seconds
+            });
+        for _ in 0..interval.max(1) {
             host.pause(SLICE);
             if let Some(reason) = exit_condition() {
                 return reason;
@@ -825,6 +839,19 @@ mod tests {
         assert_eq!(journal.matches("config: bad value").count(), 1, "{journal}");
         // The interval of the first config kept applying: 3 passes in 12 s.
         assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn a_config_that_never_loaded_puts_nothing_to_sleep() {
+        let rig = rig("never-valid");
+        let host = rig.host(|n, host| host.shutdown.set(n == 12));
+        rig.run(&host, || Err("bad regex".into()));
+        let journal = rig.journal();
+        assert!(
+            journal.contains("config: bad regex; no valid configuration yet"),
+            "{journal}"
+        );
+        assert_eq!(rig.env.snapshots.get(), 0, "no sweep without a config");
     }
 
     #[test]
