@@ -405,6 +405,14 @@ fn compile_frame(key: &str, pattern: &str) -> Result<Option<Regex>, ConfigError>
 
 /// Compiles `pattern` case-insensitively, naming `key` on failure.
 fn compile(key: &str, pattern: &str) -> Result<Regex, ConfigError> {
+    // An empty pattern matches everything: a filter would hold every agent, a
+    // prompt would be found on every line.
+    if pattern.is_empty() {
+        return Err(ConfigError::key(
+            key,
+            "a pattern must not be empty (it would match everything)",
+        ));
+    }
     RegexBuilder::new(pattern)
         .case_insensitive(true)
         .build()
@@ -428,6 +436,18 @@ fn is_identifier(s: &str, extra: &[char]) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+}
+
+/// A program name: one word, so that the Placeholder can quote it as such.
+fn check_bin(key: &str, value: &str) -> Result<(), ConfigError> {
+    check_non_empty(key, value)?;
+    if value.chars().any(char::is_whitespace) {
+        return Err(ConfigError::key(
+            key,
+            "must be a single program name, without arguments",
+        ));
+    }
+    Ok(())
 }
 
 fn check_non_empty(key: &str, value: &str) -> Result<(), ConfigError> {
@@ -554,6 +574,26 @@ impl Config {
             None => AgentStatus::SETTLED.to_vec(),
         };
 
+        if sleep_statuses.is_empty() {
+            warnings.push("sleep_statuses is empty: no agent will ever sleep".into());
+        }
+        let sleep_icon = raw.sleep_icon.unwrap_or_else(|| DEFAULT_SLEEP_ICON.into());
+        let keep_awake_icon = raw
+            .keep_awake_icon
+            .unwrap_or_else(|| DEFAULT_KEEP_AWAKE_ICON.into());
+        if sleep_icon.chars().any(|c| c.is_control() || c == '\\') {
+            return Err(ConfigError::key(
+                "sleep_icon",
+                "must not hold a control character or a backslash: it is typed into a shell",
+            ));
+        }
+        if !sleep_icon.is_empty() && sleep_icon == keep_awake_icon {
+            return Err(ConfigError::key(
+                "keep_awake_icon",
+                "must differ from sleep_icon, or a kept-awake tab cannot be told from a sleeping one",
+            ));
+        }
+
         let token_name = raw.token_name.unwrap_or_else(|| DEFAULT_TOKEN_NAME.into());
         if !is_identifier(&token_name, &['_', '-']) {
             return Err(ConfigError::key(
@@ -658,10 +698,8 @@ impl Config {
                 .unwrap_or(DEFAULT_SLEEP_AFTER_MINUTES),
             sleep_statuses,
             dry_run: raw.dry_run.unwrap_or(false),
-            sleep_icon: raw.sleep_icon.unwrap_or_else(|| DEFAULT_SLEEP_ICON.into()),
-            keep_awake_icon: raw
-                .keep_awake_icon
-                .unwrap_or_else(|| DEFAULT_KEEP_AWAKE_ICON.into()),
+            sleep_icon,
+            keep_awake_icon,
             token_name,
             tab_prefix: raw.tab_prefix.unwrap_or(true),
             preview_lines: preview_lines as u32,
@@ -869,7 +907,13 @@ fn build_profiles(
         let key = |field: &str| format!("agents.{}.{field}", b.kind);
         let profile = Profile {
             kind: b.kind.to_string(),
-            bin: checked(&key("bin"), over.bin, || b.bin.to_string())?,
+            bin: match over.bin {
+                Some(bin) => {
+                    check_bin(&key("bin"), &bin)?;
+                    bin
+                }
+                None => b.bin.to_string(),
+            },
             exit: checked(&key("exit"), over.exit, || b.exit.to_string())?,
             resume: match over.resume {
                 Some(resume) => {
@@ -896,7 +940,7 @@ fn build_profiles(
         let key = |field: &str| format!("agents.{kind}.{field}");
         let bin = over
             .bin
-            .map(|v| check_non_empty(&key("bin"), &v).map(|_| v))
+            .map(|v| check_bin(&key("bin"), &v).map(|_| v))
             .transpose()?;
         let exit = over
             .exit
@@ -1007,6 +1051,44 @@ mod tests {
 
     fn json(c: &Config) -> serde_json::Value {
         serde_json::to_value(c).unwrap()
+    }
+
+    #[test]
+    fn values_that_would_do_harm_are_refused() {
+        // An empty pattern matches everything.
+        for key in [
+            "ignore_child_regex",
+            "exclude_cwd_regex",
+            "exclude_name_regex",
+            "exclude_screen_regex",
+            "exclude_cmdline_regex",
+        ] {
+            let message = err(&format!("{key} = [\"\"]"));
+            assert!(
+                message.contains(key) && message.contains("empty"),
+                "{message}"
+            );
+        }
+        assert!(err("[agents.claude]\nprompt_regex = \"\"").contains("agents.claude.prompt_regex"));
+        // The same icon for both states, an icon a shell would read differently.
+        assert!(err("sleep_icon = \"z\"\nkeep_awake_icon = \"z\"").contains("keep_awake_icon"));
+        assert!(err("sleep_icon = \"a\\\\b\"").contains("sleep_icon"));
+        // A program with arguments is one quoted word for the Placeholder.
+        assert!(err("[agents.claude]\nbin = \"npx claude\"").contains("single program"));
+        assert!(
+            err("[agents.mine]\nbin = \"my agent\"\nexit = \"/q\"\nresume = [\"x\"]\nprompt_regex = \">\"")
+                .contains("single program")
+        );
+    }
+
+    #[test]
+    fn an_empty_list_of_statuses_is_accepted_with_a_warning() {
+        let c = cfg("sleep_statuses = []");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("no agent will ever sleep"))
+        );
     }
 
     #[test]
