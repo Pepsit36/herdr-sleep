@@ -123,8 +123,9 @@ pub fn wake_agent(
 }
 
 /// Whether the Agent in `pane` is Ready: Herdr recognises it again under
-/// `kind` (not as a Sleeping agent), its status is one of the configured
-/// `sleep_statuses`, and its screen shows the Profile's prompt.
+/// `kind` (not as a Sleeping agent), its status is a settled one (whatever
+/// `sleep_statuses` says: that setting is about when to sleep, not about
+/// whether a resumed agent is back), and its screen shows the Profile's prompt.
 pub fn is_ready(env: &dyn Env, pane: &str, kind: &str, config: &Config) -> bool {
     let Some(profile) = config.profile(kind) else {
         return false;
@@ -135,7 +136,7 @@ pub fn is_ready(env: &dyn Env, pane: &str, kind: &str, config: &Config) -> bool 
     if agent.is_sleeping() || agent.agent.as_deref() != Some(kind) {
         return false;
     }
-    if !config.allows_status(agent.agent_status) {
+    if !crate::herdr::AgentStatus::SETTLED.contains(&agent.agent_status) {
         return false;
     }
     env.screen_ansi(pane, guards::SCREEN_LINES)
@@ -471,6 +472,21 @@ pub(super) mod tests {
         assert_eq!(wake(&fake, WAIT), WakeOutcome::Woken { ms: 3000 });
         let panes = Registry::load(&fake.state_dir).panes;
         assert_eq!(panes.keys().collect::<Vec<_>>(), ["w1:p3"]);
+    }
+
+    #[test]
+    fn ready_does_not_depend_on_sleep_statuses() {
+        // `sleep_statuses = ["done"]` is about when to sleep: an idle agent
+        // that is back at its prompt is Ready all the same.
+        let fake = Fake::new("ready-statuses");
+        let config = Config {
+            sleep_statuses: vec![crate::herdr::AgentStatus::Done],
+            ..Config::default()
+        };
+        assert_eq!(
+            wake_agent(&fake, &config, "w1:p2", WAIT),
+            WakeOutcome::Woken { ms: 3000 }
+        );
     }
 
     #[test]
