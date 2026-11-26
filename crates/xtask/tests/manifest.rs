@@ -102,7 +102,12 @@ fn manifest_actions() {
             .unwrap_or_else(|| panic!("missing action {id}"));
         assert_eq!(action["title"].as_str(), Some(title));
         assert_eq!(strings(&action["contexts"]), contexts);
-        assert_eq!(strings(&action["command"]), ["bin/herdr-sleep", id]);
+        // The action of the title "now" skips the idle time.
+        let mut command = vec!["bin/herdr-sleep", id];
+        if id == "sweep" {
+            command.push("--now");
+        }
+        assert_eq!(strings(&action["command"]), command);
     }
 }
 

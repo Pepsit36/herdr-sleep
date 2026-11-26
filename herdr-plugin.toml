@@ -50,7 +50,7 @@ command = ["bin/herdr-sleep", "keep-awake"]
 id = "sweep"
 title = "Sleep idle agents now"
 contexts = ["global", "workspace"]
-command = ["bin/herdr-sleep", "sweep"]
+command = ["bin/herdr-sleep", "sweep", "--now"]
 
 [[actions]]
 id = "status"

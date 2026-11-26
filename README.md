@@ -4,7 +4,7 @@ A [Herdr](https://herdr.dev) plugin that puts idle coding agents to sleep to fre
 them on demand with their pane, name and session intact.
 
 A coding agent that has been idle for fifteen minutes still holds hundreds of megabytes. Herdr Sleep
-quits it cleanly, keeps the pane open with a tiny placeholder process (about 2 MB), and brings the
+quits it cleanly, keeps the pane open with a tiny placeholder process (a couple of MB), and brings the
 agent back with its own `--resume` the moment you focus the pane, press a key or send it a prompt.
 What you typed while it was asleep is replayed into the agent once it is ready.
 
@@ -17,8 +17,9 @@ What you typed while it was asleep is replayed into the agent once it is ready.
 
 - Herdr 0.9.2 or later.
 - Linux or macOS.
-- Nothing else for the prebuilt binaries. Without a matching release the installer builds from
-  source and needs a Rust toolchain.
+- For the prebuilt binaries: `curl` or `wget`, `tar` and `sha256sum` or `shasum`. Without a matching
+  release, or when the checkout is not the code of its last release, the installer builds from
+  source and needs a Rust toolchain (1.88 or later).
 
 ## Install
 
@@ -31,7 +32,11 @@ verifies their checksum, and falls back to `cargo build --release` when none mat
 or you are offline. Then add the sleep marker to your sidebar (below) and restart Herdr, or run the
 `ensure-watcher` action once.
 
-Update with `herdr plugin update`.
+Update with `herdr plugin update`. A watcher that was running leaves by itself within a few seconds
+once the new binary is in place, and the next Herdr hook starts the new one (the `ensure-watcher`
+action does it at once). Remove the plugin with `herdr plugin uninstall herdr-sleep`: sleeping
+panes keep their placeholder until you wake them, and `~/.local/state/herdr/plugins/herdr-sleep`
+holds the journal and the state files, which you can delete.
 
 ## How it works
 
@@ -118,8 +123,9 @@ that already sleep stay asleep. The icon in the label is the whole state: it sur
 restart, and renaming the tab without it lifts the protection. From a terminal:
 `herdr-sleep keep-awake [<pane|name>] [--on|--off]`.
 
-The other actions are `wake`, `sweep` (sleep every idle agent now), `status` and `ensure-watcher`,
-all available from Herdr's action picker.
+The other actions are `wake`, `sweep` (runs `herdr-sleep sweep --now`: every settled, unfocused
+agent sleeps now, without waiting for the idle time, the guards still apply), `status` and
+`ensure-watcher`, all available from Herdr's action picker.
 
 ## Configuration
 
@@ -197,13 +203,17 @@ herdr-sleep status [--json]                 list the managed agents and the watc
 herdr-sleep sleep [<pane|name>] [--force]   put one agent to sleep (--force skips the guards)
                   [--wait[=SECONDS]]        keep trying while the agent is not idle yet (default 120 s)
                   [--from-session]          resume the saved session of a pane with no agent, then sleep
-herdr-sleep wake  [<pane|name>] [--no-wait] wake one agent
-herdr-sleep sweep [--now] [--json]          sleep every agent that is idle long enough, now
-                                            (--now: do not wait for the idle time)
+herdr-sleep wake  [<pane|name>] [--no-wait] wake one agent [--json]
+herdr-sleep keep-awake [<pane|name>]        keep the tab of an agent awake, or release it
+                  [--on|--off]
+herdr-sleep sweep [--now] [--json]          sleep every agent that is idle long enough, three at most
+                                            per pass (--now: do not wait for the idle time, no limit)
 herdr-sleep restore [--json]                put panes back to sleep after a Herdr restart (run by the
                                             startup hook, safe to run by hand)
 herdr-sleep config [--json]                 print the effective configuration
-herdr-sleep ensure-watcher                  start the watcher unless it is running
+herdr-sleep watch [--detach]                run the watcher (the plugin starts it; --detach leaves it
+                                            running in the background)
+herdr-sleep ensure-watcher [--json]         start the watcher unless it is running
 ```
 
 Without a pane or name, `sleep` and `wake` act on the pane of the Herdr action that started them.
