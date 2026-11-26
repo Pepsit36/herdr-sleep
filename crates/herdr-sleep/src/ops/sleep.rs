@@ -47,6 +47,10 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const SLEEPING_POLL: Duration = Duration::from_millis(300);
 /// Longest wait for the Placeholder to report.
 const SLEEPING_TIMEOUT: Duration = Duration::from_secs(10);
+/// Poll interval while another Sleep holds the pane.
+const LOCK_POLL: Duration = Duration::from_millis(250);
+/// Longest wait of a manual Sleep for the one holding the pane.
+const LOCK_WAIT: Duration = Duration::from_secs(60);
 /// Title of the notification shown when an agent went to sleep.
 pub const NOTIFICATION_TITLE: &str = "Herdr Sleep";
 
@@ -148,15 +152,26 @@ pub fn sleep_agent(
     // caller read `agent` earlier, and another Sleep may have put it to sleep
     // since. Typing the Placeholder command a second time would hand it to the
     // Placeholder, which replays it into the Agent at the next Wake.
-    let _lock = match PaneLock::try_acquire(&state_dir, pane) {
-        Ok(Some(lock)) => lock,
-        Ok(None) => return SleepOutcome::Skipped(Refusal::Superseded),
-        Err(error) => {
-            journal.log(
-                "WARN",
-                &format!("{label} ({pane}): cannot lock the pane: {error}"),
-            );
-            return SleepOutcome::Aborted(format!("cannot lock the pane: {error}"));
+    // A manual Sleep waits for the one holding the pane, so that it reports
+    // the real outcome (already asleep, refused by a guard) and not a bare
+    // "superseded"; a Sweep just leaves the pane to it.
+    let mut waited = Duration::ZERO;
+    let _lock = loop {
+        match PaneLock::try_acquire(&state_dir, pane) {
+            Ok(Some(lock)) => break lock,
+            Ok(None) if mode != SleepMode::Sweep && waited < LOCK_WAIT => {
+                env.sleep(LOCK_POLL);
+                waited += LOCK_POLL;
+                continue;
+            }
+            Ok(None) => return SleepOutcome::Skipped(Refusal::Superseded),
+            Err(error) => {
+                journal.log(
+                    "WARN",
+                    &format!("{label} ({pane}): cannot lock the pane: {error}"),
+                );
+                return SleepOutcome::Aborted(format!("cannot lock the pane: {error}"));
+            }
         }
     };
     // From here on the agent is the one Herdr reports now: the caller read
@@ -990,6 +1005,24 @@ mod tests {
         assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
         assert!(fake.calls().is_empty());
         assert_eq!(fake.journal(), "");
+    }
+
+    #[test]
+    fn a_manual_sleep_waits_for_the_holder_then_gives_up() {
+        let fake = Fake::new("locked-manual");
+        let _other = PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().unwrap();
+        let outcome = run(&fake, SleepMode::Manual);
+        assert_eq!(outcome, SleepOutcome::Skipped(Refusal::Superseded));
+        assert!(fake.clock() >= LOCK_WAIT, "{:?}", fake.clock());
+        assert!(!typed(&fake));
+    }
+
+    #[test]
+    fn a_sweep_does_not_wait_for_the_holder() {
+        let fake = Fake::new("locked-sweep");
+        let _other = PaneLock::try_acquire(fake.dir(), "w1-2").unwrap().unwrap();
+        run(&fake, SleepMode::Sweep);
+        assert_eq!(fake.clock(), Duration::ZERO);
     }
 
     #[test]
