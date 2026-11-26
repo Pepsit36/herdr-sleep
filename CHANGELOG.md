@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-11-26
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleep:** an agent started in a nested shell (`nix develop`, `sudo -i`, `bash`) or with `exec`
