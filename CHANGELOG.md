@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-26
+
+<!-- stamped -->
+
 ### Added
 
 - **Restart:** every awake agent is recorded as the Watcher sweeps (`live-agents.json`), so an
