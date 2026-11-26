@@ -25,7 +25,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "herdr-sleep"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "libc",
  "regex",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "herdr-sleep-ph"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "libc",
 ]
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "regex",
  "toml",
