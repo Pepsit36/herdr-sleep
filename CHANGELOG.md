@@ -14,6 +14,11 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restart:** an agent keeps its name across a restart even when Herdr stopped reporting the name
+  for a moment just before: the record of live agents no longer drops a name it knew.
+
 ## [0.7.6] - 2026-11-26
 
 <!-- stamped -->
