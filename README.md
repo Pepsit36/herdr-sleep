@@ -204,6 +204,7 @@ The configuration is re-read on every sweep.
 
 ```
 herdr-sleep status [--json]                 list the managed agents and the watcher
+herdr-sleep doctor [--json]                 check what the plugin needs (herdr, config, state, watcher, ps)
 herdr-sleep sleep [<pane|name>] [--force]   put one agent to sleep (--force skips the guards)
                   [--wait[=SECONDS]]        keep trying while the agent is not idle yet (default 120 s)
                   [--from-session]          resume the saved session of a pane with no agent, then sleep
@@ -230,6 +231,9 @@ Sending a prompt with `herdr agent prompt` to a sleeping agent works: the text w
 is replayed into the agent once it is ready.
 
 ## Troubleshooting
+
+Start with `herdr-sleep doctor`: it checks the herdr binary and its version, the configuration, the
+state directory, the watcher, the Placeholder and `ps`, and says which one is missing.
 
 - **An agent never sleeps.** `herdr-sleep status` shows the last refusal per agent: `draft-in-prompt`
   (text typed at the prompt: set `sleep_with_draft = true` to sleep anyway and get a one-row draft

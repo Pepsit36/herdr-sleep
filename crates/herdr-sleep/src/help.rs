@@ -18,6 +18,7 @@ Commands:
   keep-awake [<pane|name>] [--on|--off]
                               Keep the tab of a pane awake, or let it sleep again
   status [--json]             List the managed agents and the watcher
+  doctor [--json]             Check what the plugin needs and say what is missing
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running
@@ -138,6 +139,24 @@ Exit codes:
   1  Herdr unreachable or the state directory unusable
 ";
 
+const DOCTOR: &str = "\
+Usage: herdr-sleep doctor [--json]
+
+Check what the plugin needs, one line each: the herdr binary and its version,
+that herdr answers, the configuration, the state directory, the watcher, the
+Placeholder and the plugin binary, the process table (`ps`) and the agent
+programs on the PATH. A line is ok, warn (the plugin works with a limit) or
+FAIL (it cannot work).
+
+Options:
+  --json      Print one JSON object instead: ok (false when a check failed),
+              checks (array of name, verdict ok|warn|fail, detail)
+
+Exit codes:
+  0  no check failed
+  1  at least one check failed
+";
+
 const SWEEP: &str = "\
 Usage: herdr-sleep sweep [--now] [--json]
 
@@ -246,6 +265,7 @@ pub fn command(name: &str) -> Option<&'static str> {
         "wake" => WAKE,
         "keep-awake" => KEEP_AWAKE,
         "status" => STATUS,
+        "doctor" => DOCTOR,
         "sweep" => SWEEP,
         "config" => CONFIG,
         "watch" => WATCH,
@@ -315,6 +335,7 @@ Commands:
   keep-awake [<pane|name>] [--on|--off]
                               Keep the tab of a pane awake, or let it sleep again
   status [--json]             List the managed agents and the watcher
+  doctor [--json]             Check what the plugin needs and say what is missing
   config [--json]             Print the effective configuration
   event                       Command of the focus hooks (wakes the focused pane)
   ensure-watcher [--json]     Start the watcher unless it is running

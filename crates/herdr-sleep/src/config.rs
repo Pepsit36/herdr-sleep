@@ -863,6 +863,11 @@ impl Config {
     }
 
     /// The Profile of `kind`, when the Kind is managed.
+    /// Every managed kind.
+    pub fn profiles(&self) -> impl Iterator<Item = &Profile> {
+        self.profiles.values()
+    }
+
     pub fn profile(&self, kind: &str) -> Option<&Profile> {
         self.profiles.get(kind)
     }
