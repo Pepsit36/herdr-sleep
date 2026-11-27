@@ -220,6 +220,7 @@ fn saved_sleeper(env: &dyn Env, config: &Config, pane: &Pane) -> Result<Sleeper,
         session: session.value.clone(),
         name: pane.name.clone().filter(|n| !n.is_empty()),
         cwd: cwd.to_string(),
+        args: Vec::new(),
         since_ms: env.now_millis(),
     })
 }
@@ -591,7 +592,7 @@ fn put_placeholder(
             token: &config.token_name,
             cwd: &sleeper.cwd,
             preview: preview.as_deref(),
-            resume: &profile.resume_argv(&sleeper.session),
+            resume: &profile.resume_argv(&sleeper.session, &sleeper.args),
         },
     );
     // `pane run` types the words into the pane's shell: the same rules as
@@ -686,7 +687,7 @@ fn resume_then_sleep(
     let resume = if fresh {
         vec![profile.bin.clone()]
     } else {
-        profile.resume_argv(&sleeper.session)
+        profile.resume_argv(&sleeper.session, &sleeper.args)
     };
     if let Some(word) = resume.iter().find(|word| !is_typeable(word)) {
         return Err(Skip::final_(format!(
@@ -964,6 +965,7 @@ mod tests {
                     session: session.into(),
                     name: name.map(Into::into),
                     cwd: cwd.into(),
+                    args: Vec::new(),
                     since_ms: 1,
                 },
             )
@@ -1822,6 +1824,7 @@ mod tests {
                 session: session.into(),
                 name: name.map(Into::into),
                 cwd: "/proj".into(),
+                args: Vec::new(),
                 since_ms: 1,
             },
         );

@@ -491,6 +491,7 @@ pub(super) mod tests {
                     session: "s".into(),
                     name: None,
                     cwd: "/".into(),
+                    args: Vec::new(),
                     since_ms: 1,
                 },
             )

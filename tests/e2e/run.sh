@@ -47,6 +47,7 @@ note() { echo "        $*"; }
 # Environment of one scenario
 # ---------------------------------------------------------------------------
 
+AGENT_ARGS="" # arguments the fake agent is started with, for example " --model opus"
 AGENT_PREFIX="" # environment the fake agent is started with, for example "FAKE_AGENT_STATUS_LINES=16 "
 ROOT=""
 SERVER_LOG=""
@@ -153,7 +154,7 @@ attach_client() {
 # start_agent <pane> <name>: run the fake claude there, wait until Herdr sees it idle, name it.
 start_agent() {
   local pane="$1" name="$2"
-  herdr pane run "$pane" "${AGENT_PREFIX}claude" >/dev/null 2>&1
+  herdr pane run "$pane" "${AGENT_PREFIX}claude${AGENT_ARGS}" >/dev/null 2>&1
   local ready=steady_idle
   # With sleep_after_minutes = 0 the Watcher would put the agent to sleep during the steady wait.
   [ "$QUICK" = 1 ] && ready=is_awake_idle
@@ -331,6 +332,21 @@ s3_wake_by_typing() {
     screen "$PANE_A" | tail -n 8 | sed 's/^/        | /'
   fi
   if [ "$(agent_session "$PANE_A")" = "$SID" ]; then ok "same session id"; else bad "session id is '$(agent_session "$PANE_A")'"; fi
+}
+
+s25_the_flags_of_the_agent_come_back() {
+  AGENT_ARGS=" --model opus --dangerously-skip-permissions"
+  new_world "$CONFIG_MANUAL" || return
+  AGENT_ARGS=""
+  sleep_alpha || return
+  herdr pane send-text "$PANE_A" hello >/dev/null 2>&1
+  herdr pane send-keys "$PANE_A" enter >/dev/null 2>&1
+  if wait_for 40 is_awake_idle "$PANE_A"; then ok "the agent is back as claude"; else bad "no wake: kind=$(agent_kind "$PANE_A")"; fi
+  if wait_for 10 pgrep -u "$(id -u)" -f -- "claude --model opus --dangerously-skip-permissions --resume"; then
+    ok "the agent was resumed with its own flags"
+  else
+    bad "no process runs with the original flags: $(pgrep -u "$(id -u)" -af claude | head -n 3)"
+  fi
 }
 
 s4_control_keys() {
@@ -763,6 +779,7 @@ SCENARIOS=(
   "s22|an agent in a nested shell stays awake|s22_an_agent_in_a_nested_shell_stays_awake"
   "s23|a second restore leaves sleeping panes alone|s23_a_second_restore_leaves_sleeping_panes_alone"
   "s24|an update replaces the Watcher|s24_an_update_replaces_the_watcher"
+  "s25|the flags of the agent come back on wake|s25_the_flags_of_the_agent_come_back"
 )
 
 # ---------------------------------------------------------------------------

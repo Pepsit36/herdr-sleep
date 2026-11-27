@@ -35,6 +35,9 @@ pub struct Sleeper {
     pub name: Option<String>,
     /// Working directory of the pane.
     pub cwd: String,
+    /// The flags of the agent's own command line that come back when it wakes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// Wall-clock milliseconds since the Unix epoch at which it went to sleep.
     pub since_ms: u64,
 }
@@ -138,6 +141,7 @@ mod tests {
             session: session.into(),
             name: Some("worker".into()),
             cwd: "/work".into(),
+            args: Vec::new(),
             since_ms: 42,
         }
     }

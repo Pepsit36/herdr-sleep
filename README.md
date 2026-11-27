@@ -51,7 +51,10 @@ holds the journal and the state files, which you can delete.
    `sleeping-<kind>` agent to Herdr under the same name.
 3. **Wake.** Focusing the pane (or its tab or space), pressing any key in it, sending it a prompt
    with `herdr agent prompt`, or running `herdr-sleep wake` starts the agent again with its
-   `--resume`. The pane name comes back, and what you typed meanwhile is typed into the agent when
+   `--resume`, and with the flags it was started with that are on its list (`--model` for every
+   built-in kind, plus `--permission-mode` and `--dangerously-skip-permissions` for claude, see
+   `keep_args`). Any other flag is dropped, so a token or a prompt on the command line is never
+   stored or typed again. The pane name comes back, and what you typed meanwhile is typed into the agent when
    it shows its prompt. The agent is started by the shell the pane had, so its aliases and `PATH`
    apply; bash, zsh and fish are handled, and with another shell nothing is reported when the
    resume fails (see Troubleshooting).
@@ -190,6 +193,7 @@ bin = "myagent"             # process name
 exit = "/quit"              # typed to make it quit
 resume = ["--resume", "{sid}"]
 prompt_regex = "^\\s*>"     # marks the input line, used to detect a draft and readiness
+# keep_args = ["--model="]  # flags of the agent's command line that come back on wake ("=": takes a value)
 # prompt_area_lines = 20     # optional, overrides the global value for this agent
 # prompt_frame_regex = ""    # optional, "" turns the frame detection off for this agent
 ```

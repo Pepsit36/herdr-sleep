@@ -244,7 +244,11 @@ pub fn sleep_agent(
         placeholder_text.as_ref(),
     ];
     let named = agent.name.as_deref().into_iter();
-    let resume = profile.resume_argv(session);
+    let kept_args = env
+        .agent_command(agent, &profile.bin)
+        .map(|command| profile.kept_args(&command))
+        .unwrap_or_default();
+    let resume = profile.resume_argv(session, &kept_args);
     if let Some(word) = early_words
         .iter()
         .copied()
@@ -289,19 +293,18 @@ pub fn sleep_agent(
     // shell behind, and the entry is what lets `restore` put the Placeholder
     // there. It is withdrawn when the agent is still running after an abandon.
     let cwd = agent.effective_cwd().unwrap_or(".");
+    let entry = Entry {
+        kind,
+        session,
+        name: agent.name.as_deref(),
+        cwd,
+        args: &kept_args,
+    };
     journal.log(
         "SLEEP",
         &format!("{label} ({pane}) kind={kind} session={session}"),
     );
-    register(
-        env,
-        &journal,
-        pane,
-        kind,
-        session,
-        agent.name.as_deref(),
-        cwd,
-    );
+    register(env, &journal, pane, &entry);
     // A Wake of the last fifteen seconds must not stop the next one, and a
     // stamp left from an earlier Wake would make the Sweep take this pane's
     // entry for a stale one.
@@ -393,7 +396,7 @@ pub fn sleep_agent(
             token: &config.token_name,
             cwd,
             preview: preview.as_deref(),
-            resume: &profile.resume_argv(session),
+            resume: &resume,
         },
     );
     // `pane run` types the words into the pane's shell, so each one is quoted
@@ -428,29 +431,13 @@ pub fn sleep_agent(
         journal.log("WARN", &format!("{label} ({pane}): {reason}"));
         // The Placeholder runs, only its report is missing: it may still be
         // restored after a restart.
-        register(
-            env,
-            &journal,
-            pane,
-            kind,
-            session,
-            agent.name.as_deref(),
-            cwd,
-        );
+        register(env, &journal, pane, &entry);
         sync_markers(env, config);
         return SleepOutcome::Warned(reason);
     }
     // The entry written before the exit is refreshed with the time of the
     // announce.
-    register(
-        env,
-        &journal,
-        pane,
-        kind,
-        session,
-        agent.name.as_deref(),
-        cwd,
-    );
+    register(env, &journal, pane, &entry);
     let freed_mb = freed_kb / 1024;
     journal.log(
         "ASLEEP",
@@ -468,23 +455,25 @@ pub fn sleep_agent(
 
 /// Record the sleeping pane in the registry. A failure is journaled and does
 /// not change the outcome of the Sleep.
-fn register(
-    env: &dyn Env,
-    journal: &Journal,
-    pane: &str,
-    kind: &str,
-    session: &str,
-    name: Option<&str>,
-    cwd: &str,
-) {
+/// What the registry records about the agent that goes to sleep.
+struct Entry<'a> {
+    kind: &'a str,
+    session: &'a str,
+    name: Option<&'a str>,
+    cwd: &'a str,
+    args: &'a [String],
+}
+
+fn register(env: &dyn Env, journal: &Journal, pane: &str, entry: &Entry<'_>) {
     let Some(state_dir) = env.state_dir() else {
         return;
     };
     let sleeper = Sleeper {
-        kind: kind.to_string(),
-        session: session.to_string(),
-        name: name.filter(|n| !n.is_empty()).map(str::to_string),
-        cwd: cwd.to_string(),
+        kind: entry.kind.to_string(),
+        session: entry.session.to_string(),
+        name: entry.name.filter(|n| !n.is_empty()).map(str::to_string),
+        cwd: entry.cwd.to_string(),
+        args: entry.args.to_vec(),
         since_ms: env.now_millis(),
     };
     if let Err(error) = Registry::add(&state_dir, pane, sleeper) {
@@ -738,6 +727,7 @@ mod tests {
         placeholder: bool,
         screen: Result<String, String>,
         rss_kb: Option<u64>,
+        command: Option<String>,
         /// Enters needed before the agent starts quitting.
         enters_needed: usize,
         /// Time from the effective Enter to the shell being foreground.
@@ -782,6 +772,7 @@ mod tests {
                 placeholder: true,
                 screen: Ok("\n  last line\n> \n\n".into()),
                 rss_kb: Some(512 * 1024),
+                command: None,
                 enters_needed: 1,
                 quit_after: Some(Duration::from_millis(1500)),
                 release_after: Some(Duration::from_millis(500)),
@@ -983,6 +974,10 @@ mod tests {
             self.rss_kb
         }
 
+        fn agent_command(&self, _: &Agent, _: &str) -> Option<String> {
+            self.command.clone()
+        }
+
         fn shell_path(&self, pid: i32) -> Option<PathBuf> {
             self.log(format!("shell-path {pid}"));
             Some("/bin/zsh".into())
@@ -1127,9 +1122,25 @@ mod tests {
                 session: "sess-1".into(),
                 name: Some("worker".into()),
                 cwd: "/work".into(),
+                args: Vec::new(),
                 since_ms: fake.now_millis(),
             })
         );
+    }
+
+    #[test]
+    fn the_flags_of_the_agent_are_kept_for_its_wake() {
+        let mut fake = Fake::new("kept-args");
+        fake.command = Some("claude --model opus --api-key sk-secret".into());
+        run(&fake, SleepMode::Sweep);
+        let sleeper = Registry::load(fake.dir()).panes.remove("w1-2").unwrap();
+        assert_eq!(sleeper.args, ["--model", "opus"]);
+        let typed = exec_call(&fake).unwrap();
+        assert!(
+            typed.contains("claude --model opus --resume sess-1"),
+            "{typed}"
+        );
+        assert!(!typed.contains("sk-secret"), "{typed}");
     }
 
     #[test]

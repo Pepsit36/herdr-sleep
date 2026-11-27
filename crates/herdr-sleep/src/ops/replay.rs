@@ -245,6 +245,7 @@ mod tests {
             session: "s".into(),
             name: None,
             cwd: "/".into(),
+            args: Vec::new(),
             since_ms: 1,
         };
         Registry::add(&placeholder_dir, "w1:p2", sleeper).unwrap();
@@ -263,6 +264,7 @@ mod tests {
             session: "s".into(),
             name: None,
             cwd: "/".into(),
+            args: Vec::new(),
             since_ms: 1,
         };
         Registry::add(&fake.state_dir, "w1:p2", sleeper).unwrap();

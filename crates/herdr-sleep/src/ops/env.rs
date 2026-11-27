@@ -78,6 +78,11 @@ pub trait Env {
     /// Resident memory of the agent process `bin` and its descendants in
     /// kilobytes, `None` when it cannot be determined.
     fn agent_rss_kb(&self, agent: &Agent, bin: &str) -> Option<u64>;
+    /// The command line of the agent process `bin`, as `ps` prints it, `None` when it cannot be
+    /// determined.
+    fn agent_command(&self, _agent: &Agent, _bin: &str) -> Option<String> {
+        None
+    }
     /// The executable behind the shell process `pid`.
     fn shell_path(&self, pid: i32) -> Option<PathBuf>;
 
@@ -247,6 +252,13 @@ impl Env for LiveEnv {
         let table = ProcessTable::load().ok()?;
         let pid = procs::find_agent_process(&info, &table, bin)?;
         Some(table.rss_of_tree(pid))
+    }
+
+    fn agent_command(&self, agent: &Agent, bin: &str) -> Option<String> {
+        let info = self.client.pane_process_info(&agent.pane_id).ok()?;
+        let table = ProcessTable::load().ok()?;
+        let pid = procs::find_agent_process(&info, &table, bin)?;
+        table.get(pid).map(|entry| entry.command.clone())
     }
 
     fn shell_path(&self, pid: i32) -> Option<PathBuf> {
