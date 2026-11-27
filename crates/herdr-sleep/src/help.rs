@@ -124,15 +124,17 @@ const STATUS: &str = "\
 Usage: herdr-sleep status [--json]
 
 List every managed agent, one line each: sleep marker, pane, name, kind,
-status, idle time and memory (MB) of an awake agent, and the last refusal
-that kept it awake. The footer gives the watcher state and the state
-directory.
+status, idle time, time left before it sleeps (due when it is) and memory
+(MB) of an awake agent, and the last refusal that kept it awake. The footer
+gives the number of awake and sleeping agents and the memory of the awake
+ones, the watcher state and the state directory.
 
 Options:
   --json      Print one JSON object instead:
               agents (array of pane, name, kind, status, sleeping, idle_seconds,
-              rss_kb, refusal; null when unknown), watcher (running, pid),
-              state_dir (string or null)
+              sleeps_in_seconds, rss_kb, refusal; null when unknown), awake,
+              sleeping, awake_rss_kb, watcher (running, pid), state_dir
+              (string or null)
 
 Exit codes:
   0  success
@@ -368,15 +370,17 @@ Files:
 Usage: herdr-sleep status [--json]
 
 List every managed agent, one line each: sleep marker, pane, name, kind,
-status, idle time and memory (MB) of an awake agent, and the last refusal
-that kept it awake. The footer gives the watcher state and the state
-directory.
+status, idle time, time left before it sleeps (due when it is) and memory
+(MB) of an awake agent, and the last refusal that kept it awake. The footer
+gives the number of awake and sleeping agents and the memory of the awake
+ones, the watcher state and the state directory.
 
 Options:
   --json      Print one JSON object instead:
               agents (array of pane, name, kind, status, sleeping, idle_seconds,
-              rss_kb, refusal; null when unknown), watcher (running, pid),
-              state_dir (string or null)
+              sleeps_in_seconds, rss_kb, refusal; null when unknown), awake,
+              sleeping, awake_rss_kb, watcher (running, pid), state_dir
+              (string or null)
 
 Exit codes:
   0  success
