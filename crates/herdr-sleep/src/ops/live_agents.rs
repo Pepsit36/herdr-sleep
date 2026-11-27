@@ -103,12 +103,18 @@ impl LiveAgents {
             }
             seen.insert(pane);
             alive.insert(agent.pane_id.clone());
+            // Herdr clears the name of an agent for a moment now and then: a
+            // missing name never replaces the one already recorded.
+            let name = agent
+                .name
+                .clone()
+                .or_else(|| self.panes.get(&agent.pane_id).and_then(|r| r.name.clone()));
             self.panes.insert(
                 agent.pane_id.clone(),
                 Sleeper {
                     kind: kind.to_string(),
                     session: session.to_string(),
-                    name: agent.name.clone(),
+                    name,
                     cwd: cwd.to_string(),
                     since_ms: now_ms,
                 },
@@ -214,6 +220,19 @@ mod tests {
             })
         );
         assert!(!refresh(&mut live, &snap, &mut alive), "nothing changed");
+    }
+
+    #[test]
+    fn a_name_herdr_stops_reporting_for_a_moment_is_kept() {
+        let mut live = LiveAgents::default();
+        let mut alive = HashSet::new();
+        let named = snapshot(&["w1:p1"], vec![agent("w1:p1", "claude", Some("s"))]);
+        refresh(&mut live, &named, &mut alive);
+        let mut unnamed_agent = agent("w1:p1", "claude", Some("s"));
+        unnamed_agent.name = None;
+        let unnamed = snapshot(&["w1:p1"], vec![unnamed_agent]);
+        refresh(&mut live, &unnamed, &mut alive);
+        assert_eq!(live.panes["w1:p1"].name.as_deref(), Some("worker"));
     }
 
     #[test]
