@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-27
+
+<!-- stamped -->
+
 ### Added
 
 - **Wake:** an agent comes back with the flags it was started with. `--model` is kept for every
