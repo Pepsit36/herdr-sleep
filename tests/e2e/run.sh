@@ -204,8 +204,9 @@ EOF
   start_agent "$PANE_A" alpha || return 1
   SID="$(agent_session "$PANE_A")"
   [ -n "$SID" ] || bad "the fake agent reported no session id"
-  # Shortly after the agent starts its status can still flip to unknown, which no scenario is about.
-  wait_for 30 steady_idle "$PANE_A"
+  # Shortly after the agent starts its status can still flip to unknown, which no scenario is
+  # about. Not with the quick Sweep: the Watcher would put the agent to sleep meanwhile.
+  [ "$QUICK" = 1 ] || wait_for 30 steady_idle "$PANE_A"
   return 0
 }
 
