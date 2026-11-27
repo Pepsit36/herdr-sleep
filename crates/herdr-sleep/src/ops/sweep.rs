@@ -840,6 +840,7 @@ mod tests {
             session: "sid".into(),
             name: None,
             cwd: "/work".into(),
+            args: Vec::new(),
             since_ms: EPOCH_MS,
         };
         Registry::add(&fake.state_dir, pane, sleeper).unwrap();
@@ -1032,6 +1033,7 @@ mod tests {
                 session: "s".into(),
                 name: None,
                 cwd: "/".into(),
+                args: Vec::new(),
                 since_ms: 1,
             };
             Registry::add(&fake.state_dir, pane, sleeper).unwrap();

@@ -81,10 +81,11 @@ const TOP_LEVEL_KEYS: [&str; 23] = [
     "agents",
 ];
 
-const AGENT_KEYS: [&str; 7] = [
+const AGENT_KEYS: [&str; 8] = [
     "bin",
     "exit",
     "resume",
+    "keep_args",
     "prompt_regex",
     "prompt_area_lines",
     "prompt_frame_regex",
@@ -201,6 +202,9 @@ pub struct Profile {
     pub exit: String,
     /// Arguments that resume a Session; contains `{sid}`.
     pub resume: Vec<String>,
+    /// Flags of the agent's own command line that come back when it wakes. An entry ending in
+    /// `=` takes a value (`--model=`); any other entry is a bare flag.
+    pub keep_args: Vec<String>,
     /// Matches the agent's empty input line when it is at its prompt.
     #[serde(serialize_with = "ser_regex")]
     pub prompt_regex: Regex,
@@ -216,10 +220,11 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Full command line that resumes `sid`: `bin` then `resume` with `{sid}`
-    /// replaced.
-    pub fn resume_argv(&self, sid: &str) -> Vec<String> {
+    /// Full command line that resumes `sid`: `bin`, the `kept` flags, then `resume` with
+    /// `{sid}` replaced.
+    pub fn resume_argv(&self, sid: &str, kept: &[String]) -> Vec<String> {
         std::iter::once(self.bin.clone())
+            .chain(kept.iter().cloned())
             .chain(
                 self.resume
                     .iter()
@@ -227,6 +232,57 @@ impl Profile {
             )
             .collect()
     }
+
+    /// The flags of `command` (the agent's command line as `ps` prints it) that this profile
+    /// keeps, in the order they were typed. A flag whose value is not made of plain characters
+    /// is left out: the value ends up typed into a shell, and secrets do not belong here.
+    pub fn kept_args(&self, command: &str) -> Vec<String> {
+        let words: Vec<&str> = command.split_whitespace().skip(1).collect();
+        let mut kept = Vec::new();
+        let mut at = 0;
+        while at < words.len() {
+            let word = words[at];
+            at += 1;
+            for entry in &self.keep_args {
+                match entry.strip_suffix('=') {
+                    Some(flag) if word == flag => {
+                        if let Some(value) = words.get(at).filter(|v| plain_value(v)) {
+                            kept.push(flag.to_string());
+                            kept.push((*value).to_string());
+                            at += 1;
+                        }
+                        break;
+                    }
+                    Some(flag) => {
+                        if let Some(value) = word.strip_prefix(&format!("{flag}="))
+                            && plain_value(value)
+                        {
+                            kept.push(word.to_string());
+                            break;
+                        }
+                    }
+                    None if word == entry => {
+                        kept.push(word.to_string());
+                        break;
+                    }
+                    None => {}
+                }
+            }
+        }
+        kept
+    }
+}
+
+/// Whether `value` is a plain word: letters, digits and a few punctuation marks, no quote or
+/// shell character. Also what keeps a flag out when its value looks like a secret or a sentence.
+fn plain_value(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.len() <= 64
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '.' | '_' | ':' | '/' | '@' | '+' | '-' | '[' | ']')
+        })
 }
 
 struct BuiltinProfile {
@@ -234,6 +290,7 @@ struct BuiltinProfile {
     bin: &'static str,
     exit: &'static str,
     resume: [&'static str; 2],
+    keep_args: &'static [&'static str],
     prompt_regex: &'static str,
 }
 
@@ -243,6 +300,11 @@ const CLAUDE: BuiltinProfile = BuiltinProfile {
     bin: "claude",
     exit: "/exit",
     resume: ["--resume", SESSION_PLACEHOLDER],
+    keep_args: &[
+        "--model=",
+        "--permission-mode=",
+        "--dangerously-skip-permissions",
+    ],
     prompt_regex: r"^\s*\u{276F}",
 };
 
@@ -252,6 +314,7 @@ const CODEX: BuiltinProfile = BuiltinProfile {
     bin: "codex",
     exit: "/exit",
     resume: ["resume", SESSION_PLACEHOLDER],
+    keep_args: &["--model="],
     prompt_regex: r"^\s*\u{203A}",
 };
 
@@ -261,6 +324,7 @@ const CURSOR: BuiltinProfile = BuiltinProfile {
     bin: "cursor-agent",
     exit: "/quit",
     resume: ["--resume", SESSION_PLACEHOLDER],
+    keep_args: &["--model="],
     prompt_regex: r"^\s*[\u{2192}>]",
 };
 
@@ -270,6 +334,7 @@ const GEMINI: BuiltinProfile = BuiltinProfile {
     bin: "gemini",
     exit: "/quit",
     resume: ["--resume", SESSION_PLACEHOLDER],
+    keep_args: &["--model="],
     prompt_regex: r"^\s*>",
 };
 
@@ -366,6 +431,7 @@ struct RawAgent {
     bin: Option<String>,
     exit: Option<String>,
     resume: Option<Vec<String>>,
+    keep_args: Option<Vec<String>>,
     prompt_regex: Option<String>,
     prompt_area_lines: Option<i64>,
     prompt_frame_regex: Option<String>,
@@ -467,6 +533,25 @@ fn check_resume(key: &str, resume: &[String]) -> Result<(), ConfigError> {
             format!("must contain an argument with `{SESSION_PLACEHOLDER}`"),
         ))
     }
+}
+
+fn check_keep_args(key: &str, keep: &[String]) -> Result<(), ConfigError> {
+    for entry in keep {
+        let flag = entry.strip_suffix('=').unwrap_or(entry);
+        let name = flag.trim_start_matches('-');
+        let valid = flag.starts_with('-')
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !valid {
+            return Err(ConfigError::key(
+                key,
+                format!("`{entry}` must be a flag such as `--model=` (with a value) or `--yolo`"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_statuses(values: &[String]) -> Result<Vec<AgentStatus>, ConfigError> {
@@ -882,6 +967,10 @@ impl Config {
 # exit = "/quit"
 # resume = ["--resume", "{{sid}}"]
 # prompt_regex = '^\s*>'
+# Flags of the agent's own command line that come back when it wakes. An entry ending in "="
+# takes a value ("--model="); any other is a bare flag. Nothing else is kept. Built-in kinds
+# keep --model, and claude also --permission-mode and --dangerously-skip-permissions.
+# keep_args = ["--model="]
 "#
         )
     }
@@ -922,6 +1011,13 @@ fn build_profiles(
                 }
                 None => b.resume.iter().map(|s| s.to_string()).collect(),
             },
+            keep_args: match over.keep_args {
+                Some(keep) => {
+                    check_keep_args(&key("keep_args"), &keep)?;
+                    keep
+                }
+                None => b.keep_args.iter().map(|s| s.to_string()).collect(),
+            },
             prompt_regex: compile(
                 &key("prompt_regex"),
                 over.prompt_regex.as_deref().unwrap_or(b.prompt_regex),
@@ -949,6 +1045,13 @@ fn build_profiles(
         if let Some(resume) = &over.resume {
             check_resume(&key("resume"), resume)?;
         }
+        let keep_args = match &over.keep_args {
+            Some(keep) => {
+                check_keep_args(&key("keep_args"), keep)?;
+                keep.clone()
+            }
+            None => Vec::new(),
+        };
         let prompt_regex = over
             .prompt_regex
             .as_deref()
@@ -977,6 +1080,7 @@ fn build_profiles(
                     bin,
                     exit,
                     resume,
+                    keep_args,
                     prompt_regex,
                     prompt_area_lines: area_lines,
                     prompt_frame_regex: frame_regex,
@@ -1310,6 +1414,50 @@ exclude_names = ["b"]"#);
     }
 
     #[test]
+    fn the_flags_of_the_profile_come_back_and_nothing_else() {
+        let c = Config::default();
+        let claude = c.profile("claude").unwrap();
+        let kept = |command: &str| claude.kept_args(command);
+        assert_eq!(
+            kept("/usr/bin/claude --model opus --dangerously-skip-permissions fix the bug"),
+            ["--model", "opus", "--dangerously-skip-permissions"]
+        );
+        assert_eq!(
+            kept("claude --permission-mode=plan"),
+            ["--permission-mode=plan"]
+        );
+        // Not in the list, or a value that is not a plain word: left out.
+        assert!(kept("claude --api-key sk-ant-xyz --verbose").is_empty());
+        assert!(kept("claude --model").is_empty());
+        assert!(kept("claude --model --dangerously-skip-permissions").len() == 1);
+        assert!(kept("claude --model=$(cat key)").is_empty());
+        assert_eq!(
+            claude.resume_argv("S", &["--model".into(), "opus".into()]),
+            ["claude", "--model", "opus", "--resume", "S"]
+        );
+    }
+
+    #[test]
+    fn keep_args_is_validated_and_replaces_the_list() {
+        let c = cfg("[agents.claude]\nkeep_args = [\"--effort=\"]");
+        assert_eq!(
+            c.profile("claude")
+                .unwrap()
+                .kept_args("claude --effort high --model x"),
+            ["--effort", "high"]
+        );
+        assert!(
+            cfg("[agents.claude]\nkeep_args = []")
+                .profile("claude")
+                .unwrap()
+                .keep_args
+                .is_empty()
+        );
+        let e = err("[agents.claude]\nkeep_args = [\"model\"]");
+        assert!(e.contains("agents.claude.keep_args"), "{e}");
+    }
+
+    #[test]
     fn default_child_regexes_compile_with_unicode_case() {
         let c = Config::default();
         assert!(c.child_ignored("/Users/x/.claude/mcp/bin/lazy-mcp --name chrome"));
@@ -1332,10 +1480,10 @@ exclude_names = ["b"]"#);
     fn builtin_profiles() {
         let c = Config::default();
         let claude = c.profile("claude").unwrap();
-        assert_eq!(claude.resume_argv("S1"), ["claude", "--resume", "S1"]);
+        assert_eq!(claude.resume_argv("S1", &[]), ["claude", "--resume", "S1"]);
         assert!(claude.prompt_regex.is_match("  \u{276F} hi"));
         assert_eq!(
-            c.profile("codex").unwrap().resume_argv("S"),
+            c.profile("codex").unwrap().resume_argv("S", &[]),
             ["codex", "resume", "S"]
         );
         assert_eq!(c.profile("cursor").unwrap().bin, "cursor-agent");
@@ -1376,7 +1524,7 @@ exclude_names = ["b"]"#);
         "#);
         assert!(c.is_managed("aider"));
         assert_eq!(
-            c.profile("aider").unwrap().resume_argv("9"),
+            c.profile("aider").unwrap().resume_argv("9", &[]),
             ["aider", "--restore", "9"]
         );
 

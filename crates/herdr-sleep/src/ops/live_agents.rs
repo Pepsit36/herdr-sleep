@@ -116,6 +116,7 @@ impl LiveAgents {
                     session: session.to_string(),
                     name,
                     cwd: cwd.to_string(),
+                    args: Vec::new(),
                     since_ms: now_ms,
                 },
             );
@@ -216,6 +217,7 @@ mod tests {
                 session: "sess-1".into(),
                 name: Some("worker".into()),
                 cwd: "/work".into(),
+                args: Vec::new(),
                 since_ms: 1_000,
             })
         );
