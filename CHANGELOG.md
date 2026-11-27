@@ -14,6 +14,15 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sleeping pane:** stopping a Placeholder (`kill`, closing the terminal) now gives the terminal
+  its settings back and releases the sleeping agent, instead of leaving the pane in raw mode with
+  a ghost agent.
+- **Sleeping pane:** a terminal whose settings cannot be changed still wakes on a key, instead of
+  waiting forever.
+- **Sleeping pane:** the name check after a Sleep no longer depends on how Herdr spaces its JSON.
+
 ## [0.7.7] - 2026-11-26
 
 <!-- stamped -->
