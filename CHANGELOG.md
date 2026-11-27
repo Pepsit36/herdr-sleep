@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-27
+
+<!-- stamped -->
+
 ### Added
 
 - **Diagnosis:** `herdr-sleep doctor` checks what the plugin needs (the herdr binary and its
