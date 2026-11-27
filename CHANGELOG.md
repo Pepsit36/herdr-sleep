@@ -14,6 +14,13 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Memory pressure:** `memory_pressure_percent` (Linux, off by default) makes idle agents sleep
+  without waiting for `sleep_after_minutes` when the available memory falls to that percent of the
+  total. An agent still has to be settled, unfocused and idle for one minute, and every guard
+  applies. The journal records a `PRESSURE` line when it kicks in.
+
 ## [0.9.0] - 2026-11-27
 
 <!-- stamped -->
