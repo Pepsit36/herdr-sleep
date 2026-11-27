@@ -69,6 +69,9 @@ hs() { # the plugin binary, with the environment Herdr gives to the plugin comma
 }
 
 # wait_for <seconds> <command...>: poll every half second until the command succeeds.
+# True when process $1 has no child.
+childless() { [ -z "$(pgrep -P "$1")" ]; }
+
 wait_for() {
   local limit="$1" deadline
   shift
@@ -256,7 +259,8 @@ s1_sleep_by_sweep() {
     note "Placeholder VmRSS: ${rss:-?} kB"
     if [ -n "$rss" ] && [ "$rss" -lt 3000 ]; then ok "VmRSS $rss kB is under 3000 kB"; else bad "VmRSS '${rss:-?}' kB is not under 3000 kB"; fi
     if [ "$(ps -o comm= -p "$pid")" = "herdr-sleep-ph" ]; then ok "ps shows herdr-sleep-ph as the pane process"; else bad "ps comm is '$(ps -o comm= -p "$pid")'"; fi
-    if [ -z "$(pgrep -P "$pid")" ]; then ok "the Placeholder has no child process"; else bad "the Placeholder has children: $(pgrep -P "$pid" | tr '\n' ' ')"; fi
+    # The Placeholder runs `herdr` itself for a moment after it starts (the name window).
+    if wait_for 10 childless "$pid"; then ok "the Placeholder has no child process"; else bad "the Placeholder has children: $(pgrep -P "$pid" | tr '\n' ' ')"; fi
     server="$(pgrep -u "$(id -u)" -x herdr | head -n 1)"
     shells="$(ps -o comm= --ppid "$server" | grep -c '^bash$')"
     # Two panes: the other workspace keeps its shell, the sleeping pane has none left.
