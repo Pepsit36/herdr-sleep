@@ -14,6 +14,13 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Diagnosis:** `herdr-sleep doctor` checks what the plugin needs (the herdr binary and its
+  version, that herdr answers, the configuration, the state directory, the watcher, the
+  Placeholder, the plugin binary, `ps` and the agent programs) and says which one is missing. It
+  exits 1 when a check fails, and `--json` prints the same checks.
+
 ## [0.8.0] - 2026-11-27
 
 <!-- stamped -->
