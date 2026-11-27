@@ -204,6 +204,9 @@ EOF
   start_agent "$PANE_A" alpha || return 1
   SID="$(agent_session "$PANE_A")"
   [ -n "$SID" ] || bad "the fake agent reported no session id"
+  # Shortly after the agent starts its status can still flip to unknown, which no scenario is about.
+  wait_for 30 steady_idle "$PANE_A"
+  return 0
 }
 
 end_world() {
@@ -608,8 +611,6 @@ s16_remote_control() {
 
 s17_keep_tab_awake() {
   new_world "$CONFIG_MANUAL" || return
-  # Shortly after the agent starts its status can still flip to unknown.
-  wait_for 30 steady_idle "$PANE_A"
   local tab out rc label
   tab="$(pane_tab "$PANE_A")"
   label="$(tab_label "$tab")"
