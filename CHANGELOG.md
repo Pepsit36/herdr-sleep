@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-27
+
+<!-- stamped -->
+
 ### Added
 
 - **Memory pressure:** `memory_pressure_percent` (Linux, off by default) makes idle agents sleep
