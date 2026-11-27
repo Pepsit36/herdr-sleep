@@ -32,6 +32,9 @@ pub struct StatusRow {
     /// Seconds the awake agent has been settled and unchanged, from the idle
     /// clock; `None` when unknown.
     pub idle_seconds: Option<u64>,
+    /// Seconds left before the sweep puts the awake agent to sleep, `0` when it is due; `None`
+    /// when the idle time is unknown.
+    pub sleeps_in_seconds: Option<u64>,
     /// Memory of the awake agent's process tree; `None` when unreadable.
     pub rss_kb: Option<u64>,
     /// Code of the last refusal remembered for the awake agent.
@@ -42,6 +45,10 @@ pub struct StatusRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StatusReport {
     pub agents: Vec<StatusRow>,
+    /// Awake agents, sleeping agents, and the memory of the awake ones.
+    pub awake: usize,
+    pub sleeping: usize,
+    pub awake_rss_kb: u64,
     pub watcher: WatcherInfo,
     pub state_dir: Option<String>,
 }
@@ -62,7 +69,7 @@ pub struct StatusInput<'a> {
 
 /// Build the report: one row per managed agent, in snapshot order.
 pub fn build_report(input: &StatusInput) -> StatusReport {
-    let agents = input
+    let agents: Vec<StatusRow> = input
         .snapshot
         .agents
         .iter()
@@ -84,6 +91,8 @@ pub fn build_report(input: &StatusInput) -> StatusReport {
                     .and_then(|profile| rss_of(input, &agent.pane_id, &profile.bin));
                 (idle, rss, clock.and_then(|clock| clock.skip.clone()))
             };
+            let sleeps_in_seconds =
+                idle_seconds.map(|idle| input.config.sleep_after().as_secs().saturating_sub(idle));
             Some(StatusRow {
                 pane: agent.pane_id.clone(),
                 name: agent.name.clone().filter(|name| !name.is_empty()),
@@ -91,12 +100,18 @@ pub fn build_report(input: &StatusInput) -> StatusReport {
                 status: agent.agent_status.to_string(),
                 sleeping,
                 idle_seconds,
+                sleeps_in_seconds,
                 rss_kb,
                 refusal,
             })
         })
         .collect();
+    let sleeping = agents.iter().filter(|row| row.sleeping).count();
+    let awake_rss_kb = agents.iter().filter_map(|row| row.rss_kb).sum();
     StatusReport {
+        awake: agents.len() - sleeping,
+        sleeping,
+        awake_rss_kb,
         agents,
         watcher: input.watcher.clone(),
         state_dir: input.state_dir.map(|dir| dir.display().to_string()),
@@ -138,9 +153,16 @@ pub fn render(report: &StatusReport, sleep_icon: &str) -> String {
     if report.agents.is_empty() {
         out.push_str("no managed agents\n");
     } else {
-        let mut rows: Vec<[String; 7]> = vec![
+        let mut rows: Vec<[String; 8]> = vec![
             [
-                "PANE", "NAME", "KIND", "STATUS", "IDLE", "RSS MB", "REFUSAL",
+                "PANE",
+                "NAME",
+                "KIND",
+                "STATUS",
+                "IDLE",
+                "SLEEPS IN",
+                "RSS MB",
+                "REFUSAL",
             ]
             .map(String::from),
         ];
@@ -152,12 +174,18 @@ pub fn render(report: &StatusReport, sleep_icon: &str) -> String {
                 agent.status.clone(),
                 agent.idle_seconds.map_or("-".into(), format_idle),
                 agent
+                    .sleeps_in_seconds
+                    .map_or("-".into(), |left| match left {
+                        0 => "due".into(),
+                        left => format_idle(left),
+                    }),
+                agent
                     .rss_kb
                     .map_or("-".into(), |kb| ((kb + 512) / 1024).to_string()),
                 agent.refusal.clone().unwrap_or_else(|| "-".into()),
             ]);
         }
-        let mut widths = [0usize; 6];
+        let mut widths = [0usize; 7];
         for row in &rows {
             for (width, cell) in widths.iter_mut().zip(row) {
                 *width = (*width).max(cell.chars().count());
@@ -176,12 +204,20 @@ pub fn render(report: &StatusReport, sleep_icon: &str) -> String {
                 line.push_str(&" ".repeat(width - cell.chars().count()));
             }
             line.push_str("  ");
-            line.push_str(&row[6]);
+            line.push_str(&row[7]);
             out.push_str(line.trim_end());
             out.push('\n');
         }
     }
     out.push('\n');
+    if !report.agents.is_empty() {
+        out.push_str(&format!(
+            "{} awake ({} MB), {} sleeping\n",
+            report.awake,
+            (report.awake_rss_kb + 512) / 1024,
+            report.sleeping
+        ));
+    }
     match (report.watcher.running, report.watcher.pid) {
         (true, Some(pid)) => out.push_str(&format!("watcher: running (pid {pid})\n")),
         (true, None) => out.push_str("watcher: running\n"),
@@ -493,6 +529,7 @@ mod tests {
                 status: "idle".into(),
                 sleeping: false,
                 idle_seconds: Some(185),
+                sleeps_in_seconds: Some(15 * 60 - 185),
                 rss_kb: Some(400 * 1024),
                 refusal: Some("busy-children".into()),
             }
@@ -526,12 +563,13 @@ mod tests {
     fn text_output_snapshot() {
         let text = render(&fixture().report(running()), "zz");
         let expected = [
-            "   PANE   NAME    KIND    STATUS   IDLE  RSS MB  REFUSAL",
-            "   w1:p1  worker  claude  idle     3m    400     busy-children",
-            "zz w1:p2  napper  claude  idle     -     -       -",
-            "   w2:p1  -       claude  done     -     -       -",
-            "   w2:p2  busy    claude  working  -     -       -",
+            "   PANE   NAME    KIND    STATUS   IDLE  SLEEPS IN  RSS MB  REFUSAL",
+            "   w1:p1  worker  claude  idle     3m    11m        400     busy-children",
+            "zz w1:p2  napper  claude  idle     -     -          -       -",
+            "   w2:p1  -       claude  done     -     -          -       -",
+            "   w2:p2  busy    claude  working  -     -          -       -",
             "",
+            "3 awake (400 MB), 1 sleeping",
             "watcher: running (pid 4242)",
             "state: /state/herdr-sleep",
             "",
@@ -559,9 +597,10 @@ mod tests {
             state_dir: None,
         });
         let expected = [
-            "   PANE   NAME                      KIND    STATUS  IDLE  RSS MB  REFUSAL",
-            "   w1:p1  a-very-long-agent-name-…  claude  idle    -     -       -",
+            "   PANE   NAME                      KIND    STATUS  IDLE  SLEEPS IN  RSS MB  REFUSAL",
+            "   w1:p1  a-very-long-agent-name-…  claude  idle    -     -          -       -",
             "",
+            "1 awake (0 MB), 0 sleeping",
             "watcher: not running",
             "state: -",
             "",
@@ -579,6 +618,9 @@ mod tests {
     fn an_empty_report() {
         let report = StatusReport {
             agents: vec![],
+            awake: 0,
+            sleeping: 0,
+            awake_rss_kb: 0,
             watcher: running(),
             state_dir: Some("/s".into()),
         };
@@ -598,7 +640,17 @@ mod tests {
             keys.sort();
             keys
         };
-        assert_eq!(keys(&value), ["agents", "state_dir", "watcher"]);
+        assert_eq!(
+            keys(&value),
+            [
+                "agents",
+                "awake",
+                "awake_rss_kb",
+                "sleeping",
+                "state_dir",
+                "watcher"
+            ]
+        );
         assert_eq!(
             keys(&value["agents"][0]),
             [
@@ -609,10 +661,16 @@ mod tests {
                 "refusal",
                 "rss_kb",
                 "sleeping",
+                "sleeps_in_seconds",
                 "status"
             ]
         );
         assert_eq!(value["agents"][0]["idle_seconds"], 185);
+        assert_eq!(value["agents"][0]["sleeps_in_seconds"], 715);
+        assert_eq!(
+            (value["awake"].as_u64(), value["sleeping"].as_u64()),
+            (Some(3), Some(1))
+        );
         assert_eq!(value["agents"][2]["name"], serde_json::Value::Null);
         assert_eq!(value["watcher"]["pid"], 4242);
         assert_eq!(value["state_dir"], "/state/herdr-sleep");

@@ -14,6 +14,17 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-27
+
+<!-- stamped -->
+
+### Added
+
+- **Status:** `herdr-sleep status` shows how long an awake agent has left before it sleeps (a
+  `SLEEPS IN` column, `due` when the next sweep takes it) and a summary line with the number of
+  awake and sleeping agents and the memory of the awake ones. `--json` carries the same figures
+  (`sleeps_in_seconds`, `awake`, `sleeping`, `awake_rss_kb`).
+
 ## [0.10.0] - 2026-11-27
 
 <!-- stamped -->
