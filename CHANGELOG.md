@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-11-27
+
+<!-- stamped -->
+
 ### Fixed
 
 - **Sleeping pane:** stopping a Placeholder (`kill`, closing the terminal) now gives the terminal
