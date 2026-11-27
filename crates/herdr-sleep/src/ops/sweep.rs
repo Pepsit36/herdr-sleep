@@ -289,6 +289,9 @@ fn record_live_agents(env: &dyn Env, config: &Config, state: &mut SweepState, sn
     }
 }
 
+/// Idle time that makes an agent due when memory is short.
+const PRESSURE_IDLE_MS: u64 = 60_000;
+
 /// Run one Sweep: update the idle clocks in `state` and put to sleep the
 /// agents that are due.
 pub fn sweep_once(env: &dyn Env, config: &Config, state: &mut SweepState) -> SweepReport {
@@ -330,7 +333,19 @@ fn sweep_pass(
     prune_registry(env, &snapshot);
     record_live_agents(env, config, state, &snapshot);
     let now = env.now_millis();
-    let sleep_after_ms = u64::try_from(config.sleep_after().as_millis()).unwrap_or(u64::MAX);
+    let mut sleep_after_ms = u64::try_from(config.sleep_after().as_millis()).unwrap_or(u64::MAX);
+    // Short of memory, an agent idle for a minute is due: the wait of `sleep_after_minutes`
+    // is for when memory is not a concern.
+    if config.memory_pressure_percent > 0
+        && let Some(available) = env.memory_available_percent()
+        && available <= config.memory_pressure_percent
+        && sleep_after_ms > PRESSURE_IDLE_MS
+    {
+        sleep_after_ms = PRESSURE_IDLE_MS;
+        if let Some(dir) = env.state_dir() {
+            Journal::new(&dir).log("PRESSURE", &format!("available={available}%"));
+        }
+    }
 
     let mut clocks: BTreeMap<String, AgentClock> = BTreeMap::new();
     let mut due = Vec::new();
@@ -437,6 +452,7 @@ mod tests {
         snapshot_error: Cell<bool>,
         snapshots: Cell<usize>,
         panes: RefCell<Vec<String>>,
+        memory: Cell<Option<u8>>,
     }
 
     impl Fake {
@@ -459,6 +475,7 @@ mod tests {
                 snapshot_error: Cell::new(false),
                 snapshots: Cell::new(0),
                 panes: RefCell::new(Vec::new()),
+                memory: Cell::new(None),
             }
         }
 
@@ -502,6 +519,10 @@ mod tests {
     }
 
     impl Env for Fake {
+        fn memory_available_percent(&self) -> Option<u8> {
+            self.memory.get()
+        }
+
         fn snapshot(&self) -> EnvResult<Snapshot> {
             self.snapshots.set(self.snapshots.get() + 1);
             if self.snapshot_error.get() {
@@ -632,6 +653,36 @@ mod tests {
         assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
         fake.advance(1);
         assert_eq!(pass(&fake, &config, &mut state).dry_run, ["p1"]);
+    }
+
+    #[test]
+    fn short_memory_makes_an_agent_due_after_one_minute() {
+        let fake = Fake::new("pressure");
+        fake.add("p1", AgentStatus::Idle, 1);
+        let mut config = config(15);
+        config.memory_pressure_percent = 10;
+        let mut state = SweepState::default();
+
+        fake.memory.set(Some(40));
+        pass(&fake, &config, &mut state);
+        fake.advance(MINUTE);
+        // Memory is fine: the usual wait applies.
+        assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
+
+        fake.memory.set(Some(10));
+        assert_eq!(pass(&fake, &config, &mut state).dry_run, ["p1"]);
+        assert!(
+            fs::read_to_string(fake.state_dir.join("herdr-sleep.log"))
+                .unwrap()
+                .contains("PRESSURE available=10%")
+        );
+
+        // The trigger is off at 0, and an unreadable memory counts as no pressure.
+        config.memory_pressure_percent = 0;
+        assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
+        config.memory_pressure_percent = 10;
+        fake.memory.set(None);
+        assert!(pass(&fake, &config, &mut state).dry_run.is_empty());
     }
 
     #[test]

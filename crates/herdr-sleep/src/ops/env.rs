@@ -83,6 +83,10 @@ pub trait Env {
     fn agent_command(&self, _agent: &Agent, _bin: &str) -> Option<String> {
         None
     }
+    /// Available memory in percent of the total, `None` when it cannot be read (not Linux).
+    fn memory_available_percent(&self) -> Option<u8> {
+        None
+    }
     /// The executable behind the shell process `pid`.
     fn shell_path(&self, pid: i32) -> Option<PathBuf>;
 
@@ -259,6 +263,12 @@ impl Env for LiveEnv {
         let table = ProcessTable::load().ok()?;
         let pid = procs::find_agent_process(&info, &table, bin)?;
         table.get(pid).map(|entry| entry.command.clone())
+    }
+
+    fn memory_available_percent(&self) -> Option<u8> {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|text| procs::available_memory_percent(&text))
     }
 
     fn shell_path(&self, pid: i32) -> Option<PathBuf> {

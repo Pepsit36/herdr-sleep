@@ -45,6 +45,7 @@ const DEFAULT_TOKEN_NAME: &str = "sleep";
 const DEFAULT_PREVIEW_LINES: u32 = 20;
 const MAX_PREVIEW_LINES: i64 = 200;
 const DEFAULT_SWEEP_INTERVAL_SECONDS: u64 = 60;
+const MEMORY_PRESSURE_RANGE: std::ops::RangeInclusive<i64> = 0..=90;
 const SWEEP_INTERVAL_RANGE: std::ops::RangeInclusive<i64> = 5..=3600;
 const DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS: u64 = 60;
 /// Default number of bottom screen rows searched for the prompt when no frame is found.
@@ -55,7 +56,7 @@ pub const DEFAULT_PROMPT_FRAME_REGEX: &str = r"^\s*\u{2500}[\u{2500}\s]{9,}$";
 
 const RESTORE_SETTLE_TIMEOUT_RANGE: std::ops::RangeInclusive<i64> = 5..=600;
 
-const TOP_LEVEL_KEYS: [&str; 23] = [
+const TOP_LEVEL_KEYS: [&str; 24] = [
     "sleep_after_minutes",
     "sleep_statuses",
     "dry_run",
@@ -77,6 +78,7 @@ const TOP_LEVEL_KEYS: [&str; 23] = [
     "exclude_screen_regex",
     "exclude_cmdline_regex",
     "sweep_interval_seconds",
+    "memory_pressure_percent",
     "restore_settle_timeout_seconds",
     "agents",
 ];
@@ -371,6 +373,9 @@ pub struct Config {
     #[serde(serialize_with = "ser_regexes")]
     pub exclude_cmdline_regex: Vec<Regex>,
     pub sweep_interval_seconds: u64,
+    /// Available memory, in percent of the total, at or under which idle agents sleep without
+    /// waiting for `sleep_after_minutes`; 0 turns the trigger off.
+    pub memory_pressure_percent: u8,
     pub restore_settle_timeout_seconds: u64,
     /// Default of every Profile's `prompt_area_lines`.
     pub prompt_area_lines: usize,
@@ -421,6 +426,7 @@ struct RawConfig {
     prompt_frame_regex: Option<String>,
     sleep_with_draft: Option<bool>,
     sweep_interval_seconds: Option<i64>,
+    memory_pressure_percent: Option<i64>,
     restore_settle_timeout_seconds: Option<i64>,
     agents: BTreeMap<String, RawAgent>,
 }
@@ -709,6 +715,18 @@ impl Config {
             ));
         }
 
+        let pressure = raw.memory_pressure_percent.unwrap_or(0);
+        if !MEMORY_PRESSURE_RANGE.contains(&pressure) {
+            return Err(ConfigError::key(
+                "memory_pressure_percent",
+                format!(
+                    "{pressure} is out of range {}..={}",
+                    MEMORY_PRESSURE_RANGE.start(),
+                    MEMORY_PRESSURE_RANGE.end()
+                ),
+            ));
+        }
+
         let settle = raw
             .restore_settle_timeout_seconds
             .unwrap_or(DEFAULT_RESTORE_SETTLE_TIMEOUT_SECONDS as i64);
@@ -798,6 +816,7 @@ impl Config {
             exclude_screen_regex,
             exclude_cmdline_regex,
             sweep_interval_seconds: sweep as u64,
+            memory_pressure_percent: pressure as u8,
             restore_settle_timeout_seconds: settle as u64,
             prompt_area_lines,
             prompt_frame_regex,
@@ -935,6 +954,11 @@ impl Config {
 
 # Seconds between two sweeps of the watcher (5 to 3600).
 #sweep_interval_seconds = {DEFAULT_SWEEP_INTERVAL_SECONDS}
+
+# Linux only. When the available memory falls to this percent of the total (1 to 90), an agent
+# idle for one minute sleeps without waiting for sleep_after_minutes. The guards still apply.
+# 0 turns it off.
+#memory_pressure_percent = 0
 
 # Seconds a pane gets (twice that in all) after a Herdr restart to reach its shell prompt and
 # for Herdr to release the native agent identity (5 to 600).
@@ -1364,6 +1388,17 @@ exclude_names = ["b"]"#);
         assert!(e.contains("sleep_statuses") && e.contains("working"), "{e}");
         assert!(err(r#"sleep_statuses = ["blocked"]"#).contains("sleep_statuses"));
         assert!(err(r#"sleep_statuses = ["nope"]"#).contains("nope"));
+    }
+
+    #[test]
+    fn memory_pressure_is_off_by_default_and_bounded() {
+        assert_eq!(cfg("").memory_pressure_percent, 0);
+        assert_eq!(
+            cfg("memory_pressure_percent = 15").memory_pressure_percent,
+            15
+        );
+        assert!(err("memory_pressure_percent = 91").contains("memory_pressure_percent"));
+        assert!(err("memory_pressure_percent = -1").contains("memory_pressure_percent"));
     }
 
     #[test]
