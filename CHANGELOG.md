@@ -14,6 +14,13 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+### Added
+
+- **Wake:** an agent comes back with the flags it was started with. `--model` is kept for every
+  built-in kind, and `--permission-mode` and `--dangerously-skip-permissions` for claude. The list
+  is the `keep_args` key of an agent kind; anything not on it, such as a token or a prompt on the
+  command line, is neither stored nor typed again.
+
 ## [0.7.8] - 2026-11-27
 
 <!-- stamped -->
