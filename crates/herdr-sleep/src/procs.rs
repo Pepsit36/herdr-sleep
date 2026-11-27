@@ -315,6 +315,22 @@ fn program_is(program: &str, bin: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
+/// Available memory as a percent of the total, from the text of `/proc/meminfo`.
+pub fn available_memory_percent(meminfo: &str) -> Option<u8> {
+    let kb = |key: &str| -> Option<u64> {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    let total = kb("MemTotal").filter(|total| *total > 0)?;
+    let available = kb("MemAvailable")?;
+    u8::try_from((available.min(total) * 100 / total).min(100)).ok()
+}
+
 /// Resident memory of one process in kilobytes, `None` when it is gone.
 pub fn rss_kb(pid: i32) -> Option<u64> {
     let output = Command::new("ps")
@@ -329,6 +345,18 @@ pub fn rss_kb(pid: i32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn available_memory_is_read_from_meminfo() {
+        let text = "MemTotal:       16000000 kB\nMemFree:  100 kB\nMemAvailable:    4000000 kB\n";
+        assert_eq!(super::available_memory_percent(text), Some(25));
+        assert_eq!(super::available_memory_percent("MemTotal: 10 kB\n"), None);
+        assert_eq!(
+            super::available_memory_percent("MemAvailable: 1 kB\n"),
+            None
+        );
+        assert_eq!(super::available_memory_percent(""), None);
+    }
+
     use super::*;
     use crate::herdr::model::ForegroundProcess;
 

@@ -168,6 +168,11 @@ ignore_child_regex = ["(^|[\\s/@_-])mcp([\\s/@._-]|$)", "npm exec", "language-se
 # Watcher
 sweep_interval_seconds = 60
 
+# Linux only. When the available memory falls to this percent of the total (1 to 90), an agent
+# idle for one minute sleeps without waiting for sleep_after_minutes; the guards still apply.
+# 0 turns it off.
+memory_pressure_percent = 0
+
 # After a Herdr restart: seconds a pane gets (twice that in all) to reach its shell
 # prompt and for Herdr to release the agent's identity (5 to 600).
 restore_settle_timeout_seconds = 60
