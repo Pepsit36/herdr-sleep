@@ -608,6 +608,8 @@ s16_remote_control() {
 
 s17_keep_tab_awake() {
   new_world "$CONFIG_MANUAL" || return
+  # Shortly after the agent starts its status can still flip to unknown.
+  wait_for 30 steady_idle "$PANE_A"
   local tab out rc label
   tab="$(pane_tab "$PANE_A")"
   label="$(tab_label "$tab")"
