@@ -14,6 +14,10 @@ a published entry is frozen, typo included.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-27
+
+<!-- stamped -->
+
 ### Added
 
 - **Status:** `herdr-sleep status` shows how long an awake agent has left before it sleeps (a
