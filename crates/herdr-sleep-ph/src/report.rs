@@ -105,7 +105,17 @@ pub fn get_agent(args: &Args) -> Vec<String> {
 /// Whether the JSON Herdr printed for an agent carries a `name`. Herdr leaves
 /// the key out when the agent has none; `display_agent` is a different key.
 pub fn has_name(json: &str) -> bool {
-    json.contains("\"name\":\"")
+    let mut rest = json;
+    while let Some(at) = rest.find("\"name\"") {
+        let before = json[..json.len() - rest.len() + at].trim_end();
+        let after = rest[at + 6..].trim_start();
+        let is_key = before.ends_with(['{', ',']);
+        if is_key && let Some(value) = after.strip_prefix(':') {
+            return value.trim_start().starts_with('"');
+        }
+        rest = &rest[at + 6..];
+    }
+    false
 }
 
 pub fn rename(args: &Args, name: &str) -> Vec<String> {
@@ -345,6 +355,10 @@ mod tests {
             r#"{"agent":"sleeping-claude","display_agent":"alpha"}"#
         ));
         assert!(!has_name(r#"{"agent":"sleeping-claude","pane_id":"p"}"#));
+        // Spacing does not matter, and a value that merely says "name" is not a key.
+        assert!(has_name("{\"agent\": \"x\",\n \"name\" : \"alpha\"}"));
+        assert!(!has_name(r#"{"cwd":"/work/\"name\":\"x\"","pane_id":"p"}"#));
+        assert!(!has_name(r#"{"name":null,"pane_id":"p"}"#));
         assert_eq!(get_agent(&sample()).join(" "), "agent get w1-2");
     }
 

@@ -35,6 +35,9 @@ fn main() -> ExitCode {
         }
     };
 
+    tty::catch_stop_signals();
+    // A terminal whose settings cannot be changed still gets its keys, in cooked mode.
+    let is_tty = tty::is_tty();
     let raw = tty::RawMode::enter();
     let mut reporter = report::Reporter::new(&args);
 
@@ -51,7 +54,7 @@ fn main() -> ExitCode {
 
     // Keys typed while Herdr is told are kept by the terminal for `capture`.
     reporter.declare();
-    let captured = tty::capture(raw.is_some());
+    let captured = tty::capture(is_tty);
     reporter.release();
     // The terminal went away without a key: there is nobody to wake it for.
     let Some(captured) = captured else {

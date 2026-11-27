@@ -329,3 +329,24 @@ fn control_keys_wake_with_nothing_to_type() {
         ""
     );
 }
+
+#[test]
+fn a_stop_signal_releases_the_agent_and_ends_the_placeholder() {
+    let mut h = Harness::start("term");
+    h.expect_screen("is asleep");
+    wait_for("the identity to be declared", || h.herdr_log().len() >= 6);
+    // SAFETY: signals the child the harness started.
+    unsafe { libc::kill(h.child.id() as libc::pid_t, libc::SIGTERM) };
+    wait_for("the placeholder to end", || {
+        h.child.try_wait().unwrap().is_some()
+    });
+    assert!(
+        h.herdr_log()
+            .iter()
+            .any(|l| l.starts_with("pane release-agent 1-2")),
+        "{:?}",
+        h.herdr_log()
+    );
+    // Nobody asked for a Wake: no Replay, no shell.
+    assert!(!h.path("main.out").exists() && !h.path("shell.out").exists());
+}
