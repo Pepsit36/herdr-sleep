@@ -11,13 +11,14 @@ use std::path::PathBuf;
 use herdr_sleep::ops::ReplayArgs;
 
 /// Every command name, internal ones included.
-pub const COMMANDS: [&str; 11] = [
+pub const COMMANDS: [&str; 12] = [
     "watch",
     "sweep",
     "sleep",
     "wake",
     "keep-awake",
     "status",
+    "doctor",
     "config",
     "event",
     "replay",
@@ -52,6 +53,9 @@ pub enum Invocation {
         state: Option<bool>,
     },
     Status {
+        json: bool,
+    },
+    Doctor {
         json: bool,
     },
     Sweep {
@@ -206,6 +210,11 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         }
         "status" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
             Invocation::Status {
+                json: p.has("--json"),
+            }
+        }),
+        "doctor" => finish(command, split(command, args, &["--json"]), 0, |p, _| {
+            Invocation::Doctor {
                 json: p.has("--json"),
             }
         }),
@@ -614,7 +623,7 @@ mod tests {
             parse(&["ensure-watcher", "--json"]),
             Invocation::EnsureWatcher { json: true }
         );
-        for command in ["status", "sweep", "config", "ensure-watcher"] {
+        for command in ["status", "doctor", "sweep", "config", "ensure-watcher"] {
             assert_eq!(
                 usage(&[command, "x"]),
                 format!("{command}: takes no argument, got 'x'")

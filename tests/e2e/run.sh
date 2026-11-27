@@ -349,6 +349,21 @@ s25_the_flags_of_the_agent_come_back() {
   fi
 }
 
+s26_doctor() {
+  new_world "$CONFIG_MANUAL" || return
+  local out rc
+  out="$(hs doctor --json 2>&1)"
+  rc=$?
+  if [ "$rc" = 0 ] && [ "$(jq -r '.ok' <<<"$out" 2>/dev/null)" = "true" ]; then ok "doctor finds nothing failing"; else bad "doctor exited $rc: $out"; fi
+  if [ "$(jq -r '.checks[] | select(.name=="session") | .verdict' <<<"$out" 2>/dev/null)" = "ok" ]; then ok "doctor sees the herdr session"; else bad "no session check: $out"; fi
+  # A state directory nobody can write in is a failure, with the exit code of one.
+  chmod a-w "$STATE_DIR"
+  out="$(hs doctor 2>&1)"
+  rc=$?
+  chmod u+w "$STATE_DIR"
+  if [ "$rc" = 1 ] && [[ "$out" == *"FAIL state"* ]]; then ok "doctor fails on an unwritable state directory"; else bad "doctor exited $rc: $out"; fi
+}
+
 s4_control_keys() {
   new_world "$CONFIG_MANUAL" || return
   sleep_alpha || return
@@ -780,6 +795,7 @@ SCENARIOS=(
   "s23|a second restore leaves sleeping panes alone|s23_a_second_restore_leaves_sleeping_panes_alone"
   "s24|an update replaces the Watcher|s24_an_update_replaces_the_watcher"
   "s25|the flags of the agent come back on wake|s25_the_flags_of_the_agent_come_back"
+  "s26|doctor reports what is wrong|s26_doctor"
 )
 
 # ---------------------------------------------------------------------------

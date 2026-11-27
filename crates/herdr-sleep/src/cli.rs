@@ -5,6 +5,7 @@
 //! usage error exits 2.
 
 mod config_cmd;
+mod doctor;
 mod status;
 
 use std::io::Write;
@@ -24,6 +25,7 @@ use herdr_sleep::watcher::{self, Ensure, WatchEnd};
 use serde_json::json;
 
 pub use config_cmd::run as config;
+pub use doctor::run as doctor;
 pub use status::run as status;
 
 /// Print `text` and a newline on stdout. A closed pipe (`| head`) is not an
